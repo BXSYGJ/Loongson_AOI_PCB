@@ -1,0 +1,99 @@
+# ====================================================
+# Smart AOI 智能检测产线项目 - 团队协同专用 Git 忽略规则
+# ====================================================
+
+# ==================== KiCad 硬件设计忽略规则 ====================
+*.kicad_prl
+*.kicad_pro-bak
+*.kicad_sch-bak
+*.kicad_pcb-bak
+*.kicad_dru-bak
+fp-info-cache
+*.bak
+*.bck
+*.kicad_wks-bak
+# 【修正】放行项目内自定义库关联表，确保队友打开KiCad不报错
+!fp-lib-table
+!sym-lib-table
+
+# 3D模型缓存
+*.3dshapes/*.step-bak
+*.3dshapes/*.stp-bak
+# 生成的Gerber和钻孔文件（强烈建议单独建gerber目录并提交，此处不忽略整个目录）
+# gerber/
+
+# ==================== Altium Designer 忽略规则 ====================
+# 如果后续有队友习惯用AD，取消下面注释即可
+# *.PrjPcbStructure
+# *.SchDocPreview
+# *.PcbDocPreview
+# *.OutJob
+# History/
+# Project Logs/
+
+# ==================== Qt / Qt Creator 界面开发忽略规则（新增刚需） ====================
+# 绝对禁止提交本地用户配置文件，否则会导致队友的 Qt Creator 路径冲突卡死
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+
+# Qt 编译生成的影子构建目录（如 build-Smart_AOI-Desktop-Debug）
+build-*/
+
+# Qt 自动生成的 C++ 中断代码文件
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+
+# ==================== 龙芯嵌入式 C/C++ 编译忽略规则 ====================
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.d
+*.su
+*.swp
+*.swo
+build/
+Debug/
+Release/
+*.cmake
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# ==================== Python 辅助与 AI 算法脚本忽略规则 ====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+
+# ==================== 通用编辑器/操作系统垃圾文件 ====================
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.temp
+.idea/
+*.swp
