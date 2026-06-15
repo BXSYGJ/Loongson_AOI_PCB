@@ -97,3 +97,9 @@ Thumbs.db
 *.temp
 .idea/
 *.swp
+
+# ==================== Algorithm data and generated artifacts ====================
+datasets/
+runs/
+*.pt
+algorithm/outputs/
