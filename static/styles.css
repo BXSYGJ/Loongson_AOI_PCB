@@ -182,13 +182,16 @@ svg {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: grid;
   grid-template-columns: 76px minmax(0, 1fr);
   background: var(--bg);
+  overflow: hidden;
 }
 
 .side-rail {
+  min-height: 0;
   background: var(--rail);
   border-right: 1px solid var(--line);
   display: flex;
@@ -231,11 +234,14 @@ svg {
 }
 
 .workbench {
+  height: 100vh;
   min-width: 0;
+  min-height: 0;
   padding: 16px;
   display: grid;
-  grid-template-rows: auto minmax(530px, 1fr) 238px;
+  grid-template-rows: auto minmax(0, 1fr) minmax(198px, 27vh);
   gap: 12px;
+  overflow: hidden;
 }
 
 .topbar,
@@ -250,12 +256,53 @@ svg {
 }
 
 .topbar {
-  min-height: 74px;
-  display: flex;
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(420px, auto);
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 14px 18px;
+  padding: 12px 18px;
+}
+
+.top-control {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas:
+    "status actions"
+    "hint hint";
+  align-items: center;
+  justify-content: end;
+  gap: 8px 12px;
+}
+
+.top-control .top-status {
+  grid-area: status;
+  justify-content: end;
+}
+
+.top-actions {
+  grid-area: actions;
+  display: grid;
+  grid-template-columns: auto minmax(128px, auto) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.top-actions .primary-btn,
+.top-actions .secondary-btn,
+.top-actions .danger-btn {
+  min-height: 40px;
+  padding-inline: 14px;
+  white-space: nowrap;
+}
+
+.top-control .command-hint {
+  grid-area: hint;
+  justify-self: stretch;
+  min-height: 30px;
+  padding-block: 6px;
 }
 
 .title-line {
@@ -312,18 +359,23 @@ label span,
 
 .content-grid {
   min-width: 0;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(560px, 1fr) 372px;
+  grid-template-columns: minmax(680px, 1fr) 352px;
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
+  overflow: hidden;
 }
 
 .scan-panel {
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   padding: 14px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
+  overflow: hidden;
 }
 
 .section-head {
@@ -368,7 +420,7 @@ label span,
 
 .canvas-wrap {
   min-height: 0;
-  height: clamp(420px, 58vh, 660px);
+  height: 100%;
   position: relative;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -384,8 +436,10 @@ label span,
 
 .preview-panel {
   min-width: 0;
+  min-height: 0;
   max-width: 100%;
-  align-self: start;
+  height: 100%;
+  align-self: stretch;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px;
@@ -394,7 +448,7 @@ label span,
   align-content: start;
   gap: 10px;
   background: var(--panel-soft);
-  overflow: hidden;
+  overflow: auto;
 }
 
 .camera-preview {
@@ -406,7 +460,7 @@ label span,
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  height: clamp(170px, 18vw, 240px);
+  height: clamp(150px, 18vh, 230px);
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: #eef3f8;
@@ -537,6 +591,8 @@ label span,
 
 .control-panel {
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   padding: 12px;
   display: grid;
   gap: 10px;
@@ -724,6 +780,62 @@ select:disabled {
   font-weight: 800;
 }
 
+.phone-profile {
+  display: grid;
+  gap: 8px;
+}
+
+.phone-profile > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--rail);
+}
+
+.segmented-control label {
+  display: block;
+  min-width: 0;
+}
+
+.segmented-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented-control span {
+  display: grid;
+  min-height: 34px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.segmented-control input:checked + span {
+  border-color: rgba(23, 105, 170, 0.35);
+  color: var(--blue-dark);
+  background: var(--paper);
+  box-shadow: 0 2px 8px rgba(21, 41, 64, 0.08);
+}
+
+.segmented-control input:focus-visible + span {
+  outline: 2px solid rgba(23, 105, 170, 0.28);
+  outline-offset: 1px;
+}
+
 .phone-queue-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -836,19 +948,25 @@ button:disabled {
 
 .bottom-grid {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
   gap: 12px;
+  overflow: hidden;
 }
 
 .event-panel,
 .defect-panel {
   min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
 
 #eventLog {
-  height: 174px;
+  min-height: 0;
+  height: auto;
   margin: 0;
   padding: 10px 14px 14px 34px;
   overflow: auto;
@@ -861,7 +979,8 @@ button:disabled {
 }
 
 .defect-list {
-  height: 174px;
+  min-height: 0;
+  height: auto;
   overflow: auto;
   padding: 10px 14px 14px;
   display: grid;
@@ -882,6 +1001,14 @@ button:disabled {
 
 .defect-item.empty {
   border-left-color: var(--green);
+}
+
+.defect-item.suspected {
+  border-left-color: var(--amber);
+}
+
+.defect-item.suspected .thumb {
+  border-color: rgba(183, 121, 31, 0.42);
 }
 
 .thumb {
@@ -914,17 +1041,46 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .content-grid,
-  .bottom-grid {
-    grid-template-columns: 1fr;
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
   }
 
   .workbench {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
     grid-template-rows: auto auto auto;
   }
 
-  .control-panel {
+  .topbar {
+    grid-template-columns: 1fr;
+  }
+
+  .top-control {
+    justify-content: stretch;
+  }
+
+  .content-grid,
+  .bottom-grid {
+    grid-template-columns: 1fr;
     overflow: visible;
+  }
+
+  .scan-panel,
+  .preview-panel {
+    height: auto;
+  }
+
+  .control-panel {
+    height: auto;
+    overflow: visible;
+  }
+
+  .canvas-wrap {
+    height: 54vh;
+    min-height: 380px;
   }
 }
 
@@ -957,11 +1113,24 @@ button:disabled {
 
   .topbar {
     align-items: flex-start;
-    flex-direction: column;
+  }
+
+  .top-control {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "status"
+      "actions"
+      "hint";
+    justify-content: stretch;
   }
 
   .top-status {
     flex-wrap: wrap;
+    justify-content: start;
+  }
+
+  .top-actions {
+    grid-template-columns: 1fr 1fr 1fr;
   }
 
   .inspection-stage {
@@ -988,6 +1157,10 @@ button:disabled {
   .metrics,
   .state-grid,
   .two-col {
+    grid-template-columns: 1fr;
+  }
+
+  .top-actions {
     grid-template-columns: 1fr;
   }
 

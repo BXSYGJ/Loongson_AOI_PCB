@@ -99,8 +99,23 @@ PHONE_TILE_SIZES = _env_int_list(
     "LOONGSON_AOI_PHONE_TILE_SIZES",
     (PHONE_TILE_SIZE,) if _PHONE_TILE_SIZE_ENV else (512, 640, 800),
 )
-PHONE_IMGSZS = _env_int_list("LOONGSON_AOI_PHONE_IMGSZS", (_env_int("LOONGSON_AOI_YOLO_IMGSZ", 960),))
+_DEFAULT_PHONE_IMGSZ = _env_int("LOONGSON_AOI_YOLO_IMGSZ", 960)
+PHONE_IMGSZS = _env_int_list(
+    "LOONGSON_AOI_PHONE_IMGSZS",
+    (640, _DEFAULT_PHONE_IMGSZ) if _DEFAULT_PHONE_IMGSZ != 640 else (640,),
+)
 PHONE_TILE_OVERLAP = _env_float("LOONGSON_AOI_PHONE_TILE_OVERLAP", 0.5)
+PHONE_FAST_TILE_SIZES = _env_int_list("LOONGSON_AOI_PHONE_FAST_TILE_SIZES", (640,))
+PHONE_FAST_IMGSZS = _env_int_list("LOONGSON_AOI_PHONE_FAST_IMGSZS", (640,))
+PHONE_FAST_TILE_OVERLAP = _env_float("LOONGSON_AOI_PHONE_FAST_TILE_OVERLAP", 0.5)
+PHONE_PRECISION_TILE_SIZES = _env_int_list("LOONGSON_AOI_PHONE_PRECISION_TILE_SIZES", PHONE_TILE_SIZES)
+PHONE_PRECISION_IMGSZS = _env_int_list("LOONGSON_AOI_PHONE_PRECISION_IMGSZS", PHONE_IMGSZS)
+PHONE_PRECISION_TILE_OVERLAP = _env_float("LOONGSON_AOI_PHONE_PRECISION_TILE_OVERLAP", PHONE_TILE_OVERLAP)
+PHONE_FUSION_IOU = _env_float("LOONGSON_AOI_PHONE_FUSION_IOU", 0.45)
+PHONE_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_CONFIRM_CONF", 0.5)
+PHONE_MULTI_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF", 0.35)
+PHONE_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_SUSPECTED_CONF", 0.2)
+PHONE_MULTI_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_SUSPECTED_CONF", 0.1)
 VIDEO_DEFAULT_INFERENCE_FPS = _env_float("LOONGSON_AOI_VIDEO_INFERENCE_FPS", 5.0)
 VIDEO_DEFAULT_PREVIEW_FPS = _env_float("LOONGSON_AOI_VIDEO_PREVIEW_FPS", 8.0)
 CAMERA_SOURCE_FILE = Path(os.getenv("LOONGSON_AOI_CAMERA_SOURCE_FILE", ROOT / "camera_source.txt")).expanduser()
@@ -124,6 +139,46 @@ def _safe_filename(filename: str) -> str:
     stem = Path(source).stem
     stem = re.sub(r"[^0-9A-Za-z._-]+", "_", stem).strip("._-") or "pcb-image"
     return f"{stem}{suffix}"
+
+
+def normalize_phone_detection_profile(profile: str | None) -> str:
+    value = str(profile or "fast").strip().lower()
+    aliases = {
+        "fast": "fast",
+        "quick": "fast",
+        "speed": "fast",
+        "快速": "fast",
+        "快速模式": "fast",
+        "precision": "precision",
+        "precise": "precision",
+        "accurate": "precision",
+        "high": "precision",
+        "high_precision": "precision",
+        "高精": "precision",
+        "高精模式": "precision",
+    }
+    if value not in aliases:
+        raise CameraTriggerError(f"Unsupported phone detection profile: {profile}")
+    return aliases[value]
+
+
+def phone_detection_profile_config(profile: str | None = None) -> dict[str, Any]:
+    normalized = normalize_phone_detection_profile(profile)
+    if normalized == "precision":
+        return {
+            "profile": "precision",
+            "label": "高精模式",
+            "tile_sizes": PHONE_PRECISION_TILE_SIZES,
+            "imgszs": PHONE_PRECISION_IMGSZS,
+            "overlap": PHONE_PRECISION_TILE_OVERLAP,
+        }
+    return {
+        "profile": "fast",
+        "label": "快速模式",
+        "tile_sizes": PHONE_FAST_TILE_SIZES,
+        "imgszs": PHONE_FAST_IMGSZS,
+        "overlap": PHONE_FAST_TILE_OVERLAP,
+    }
 
 
 def parse_source(source: str) -> int | str:
@@ -514,12 +569,18 @@ class YoloDetector:
         return detections, image, (time.perf_counter() - start) * 1000.0
 
 
-def draw_detection(image: Any, bbox: list[int], label: str, confidence: float) -> None:
+def draw_detection(
+    image: Any,
+    bbox: list[int],
+    label: str,
+    confidence: float,
+    color: tuple[int, int, int] = (0, 180, 0),
+) -> None:
     cv2 = _import_cv2()
     x1, y1, x2, y2 = bbox
     text = f"{label} {confidence:.2f}"
-    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 180, 0), 2)
-    cv2.putText(image, text, (x1, max(y1 - 8, 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 180, 0), 2)
+    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+    cv2.putText(image, text, (x1, max(y1 - 8, 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
 
 camera_manager = CameraManager()
@@ -836,6 +897,113 @@ def _nms_detections(detections: list[dict[str, Any]], iou_threshold: float = 0.4
                 class_kept.append(item)
         kept.extend(class_kept)
     return sorted(kept, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+
+
+def _profile_key(profile: dict[str, Any]) -> str:
+    return f"{int(profile.get('tile_size', 0))}@{int(profile.get('imgsz', 0))}"
+
+
+def _source_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tile_size": int(profile.get("tile_size", 0)),
+        "imgsz": int(profile.get("imgsz", 0)),
+        "tile_stride": int(profile.get("tile_stride", 0)),
+    }
+
+
+def _fuse_profile_detections(
+    profile_results: list[dict[str, Any]],
+    iou_threshold: float = PHONE_FUSION_IOU,
+    confirm_conf: float = PHONE_CONFIRM_CONF,
+    multi_confirm_conf: float = PHONE_MULTI_CONFIRM_CONF,
+    suspected_conf: float = PHONE_SUSPECTED_CONF,
+    multi_suspected_conf: float = PHONE_MULTI_SUSPECTED_CONF,
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for profile in profile_results:
+        profile_info = _source_profile(profile)
+        profile_key = _profile_key(profile)
+        for detection in profile.get("detections", []):
+            candidate = dict(detection)
+            candidate["_profile"] = profile_info
+            candidate["_profile_key"] = profile_key
+            candidates.append(candidate)
+
+    clusters: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: float(item.get("confidence", 0.0)), reverse=True):
+        bbox = candidate.get("bbox") or [0, 0, 0, 0]
+        defect_type = str(candidate.get("type", ""))
+        best_cluster: dict[str, Any] | None = None
+        best_iou = 0.0
+        for cluster in clusters:
+            if str(cluster["type"]) != defect_type:
+                continue
+            iou = _bbox_iou(bbox, cluster["bbox"])
+            if iou >= iou_threshold and iou > best_iou:
+                best_iou = iou
+                best_cluster = cluster
+        if best_cluster is None:
+            clusters.append({"type": defect_type, "bbox": bbox, "items": [candidate]})
+        else:
+            best_cluster["items"].append(candidate)
+
+    confirmed: list[dict[str, Any]] = []
+    suspected: list[dict[str, Any]] = []
+    discarded: list[dict[str, Any]] = []
+    for cluster in clusters:
+        items = sorted(cluster["items"], key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+        best = items[0]
+        profile_map: dict[str, dict[str, Any]] = {}
+        for item in items:
+            profile_map.setdefault(str(item["_profile_key"]), dict(item["_profile"]))
+        confidences = [float(item.get("confidence", 0.0)) for item in items]
+        max_confidence = max(confidences, default=0.0)
+        mean_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        support_count = len(profile_map)
+        evidence_score = min(0.99, max_confidence + 0.05 * max(0, support_count - 1))
+
+        if max_confidence >= confirm_conf or (support_count >= 2 and max_confidence >= multi_confirm_conf):
+            decision = "confirmed"
+        elif max_confidence >= suspected_conf or (support_count >= 2 and max_confidence >= multi_suspected_conf):
+            decision = "suspected"
+        else:
+            decision = "discarded"
+
+        fused = {
+            "type": best.get("type"),
+            "label": best.get("label") or best.get("type"),
+            "bbox": [int(value) for value in best.get("bbox", [0, 0, 0, 0])],
+            "confidence": round(evidence_score, 4),
+            "max_confidence": round(max_confidence, 4),
+            "mean_confidence": round(mean_confidence, 4),
+            "support_count": int(support_count),
+            "decision": decision,
+            "source_profiles": list(profile_map.values()),
+            "source_tile": best.get("source_tile"),
+        }
+        if decision == "confirmed":
+            confirmed.append(fused)
+        elif decision == "suspected":
+            suspected.append(fused)
+        else:
+            discarded.append(fused)
+
+    confirmed = sorted(confirmed, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+    suspected = sorted(suspected, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+    discarded = sorted(discarded, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+    return {
+        "detections": confirmed + suspected,
+        "confirmed_defects": confirmed,
+        "suspected_defects": suspected,
+        "discarded_defects": discarded,
+        "fusion_rules": {
+            "iou_threshold": iou_threshold,
+            "confirm_conf": confirm_conf,
+            "multi_confirm_conf": multi_confirm_conf,
+            "suspected_conf": suspected_conf,
+            "multi_suspected_conf": multi_suspected_conf,
+        },
+    }
 
 
 def _mosaic_geometry(manifest: dict[str, Any], tile_width: int, tile_height: int) -> dict[str, Any]:
@@ -1225,14 +1393,21 @@ def detect_tiled_image(
             "detections": [],
         },
     )
-    detections = list(selected_profile["detections"])
+    fusion = _fuse_profile_detections(profile_results)
+    detections = list(fusion["detections"])
     annotated = image.copy()
     for detection in detections:
+        decision = str(detection.get("decision", "confirmed"))
+        color = (0, 180, 0) if decision == "confirmed" else (0, 170, 255)
+        label = str(detection.get("label") or detection.get("type"))
+        if decision == "suspected":
+            label = f"suspected {label}"
         draw_detection(
             annotated,
             detection["bbox"],
-            str(detection.get("label") or detection.get("type")),
+            label,
             float(detection.get("confidence", 0.0)),
+            color=color,
         )
 
     annotated_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1245,8 +1420,8 @@ def detect_tiled_image(
             json.dump(detections, file, ensure_ascii=False, indent=2)
 
     details = {
-        "strategy": "best_confidence_profile" if len(profile_results) > 1 else "tiled",
-        "selection_metric": "max_best_confidence",
+        "strategy": "profile_ensemble" if len(profile_results) > 1 else "tiled",
+        "selection_metric": "multi_profile_evidence",
         "selected_profile": {
             "tile_size": int(selected_profile["tile_size"]),
             "imgsz": int(selected_profile["imgsz"]),
@@ -1263,8 +1438,14 @@ def detect_tiled_image(
         "tile_strides": {str(size): stride for size, stride in tile_strides.items()},
         "tile_count": sum(int(profile["tile_count"]) for profile in profile_results),
         "selected_tile_count": int(selected_profile["tile_count"]),
-        "raw_detection_count": int(selected_profile["raw_detection_count"]),
+        "raw_detection_count": sum(int(profile["raw_detection_count"]) for profile in profile_results),
         "nms_detection_count": len(detections),
+        "confirmed_count": len(fusion["confirmed_defects"]),
+        "suspected_count": len(fusion["suspected_defects"]),
+        "discarded_count": len(fusion["discarded_defects"]),
+        "confirmed_defects": fusion["confirmed_defects"],
+        "suspected_defects": fusion["suspected_defects"],
+        "fusion_rules": fusion["fusion_rules"],
         "profile_summaries": [
             {
                 "tile_size": int(profile["tile_size"]),
@@ -1455,14 +1636,24 @@ def get_phone_upload(upload_id: str) -> dict[str, Any]:
     return _phone_upload_public_payload(_read_phone_metadata(upload_id))
 
 
-def detect_phone_upload(upload_id: str) -> dict[str, Any]:
+def detect_phone_upload(upload_id: str, detection_profile: str | None = None) -> dict[str, Any]:
     metadata = _read_phone_metadata(upload_id)
     raw_path = resolve_artifact(metadata["raw_image"])
     upload_dir = _phone_upload_path(upload_id)
     annotated_path = upload_dir / "annotated.jpg"
     result_json_path = upload_dir / "result.json"
 
-    detections, inference_ms, detection_details = detect_tiled_image(raw_path, annotated_path, result_json_path)
+    profile_config = phone_detection_profile_config(detection_profile)
+    detections, inference_ms, detection_details = detect_tiled_image(
+        raw_path,
+        annotated_path,
+        result_json_path,
+        tile_size=profile_config["tile_sizes"],
+        imgsz=profile_config["imgszs"],
+        overlap=float(profile_config["overlap"]),
+    )
+    detection_details["phone_detection_profile"] = profile_config["profile"]
+    detection_details["phone_detection_profile_label"] = profile_config["label"]
     metadata.update(
         {
             "status": "detected",
@@ -1471,6 +1662,12 @@ def detect_phone_upload(upload_id: str) -> dict[str, Any]:
             "result_json": _rel(result_json_path),
             "defects": detections,
             "defect_count": len(detections),
+            "confirmed_defects": detection_details.get("confirmed_defects", detections),
+            "suspected_defects": detection_details.get("suspected_defects", []),
+            "confirmed_count": int(detection_details.get("confirmed_count", len(detections))),
+            "suspected_count": int(detection_details.get("suspected_count", 0)),
+            "detection_profile": profile_config["profile"],
+            "detection_profile_label": profile_config["label"],
             "inference_ms": round(inference_ms, 2),
             "detection_strategy": detection_details["strategy"],
             "detection_details": detection_details,

@@ -1027,10 +1027,19 @@ async def run_handheld_detection(
         camera_trigger.stop_video_detection()
 
 
-async def run_phone_detection(websocket: WebSocket, scan_id: str, upload_id: str, stop_event: asyncio.Event) -> None:
+async def run_phone_detection(
+    websocket: WebSocket,
+    scan_id: str,
+    upload_id: str,
+    stop_event: asyncio.Event,
+    detection_profile: str = "fast",
+) -> None:
     try:
+        profile_config = camera_trigger.phone_detection_profile_config(detection_profile)
         selected = await asyncio.to_thread(camera_trigger.get_phone_upload, upload_id)
         selected["operation_mode"] = "phone"
+        selected["detection_profile"] = profile_config["profile"]
+        selected["detection_profile_label"] = profile_config["label"]
         await send_packet(websocket, "phone_upload_selected", selected, scan_id)
         if stop_event.is_set():
             await send_packet(
@@ -1047,11 +1056,13 @@ async def run_phone_detection(websocket: WebSocket, scan_id: str, upload_id: str
                 "upload_id": upload_id,
                 "raw_image": selected.get("raw_image"),
                 "operation_mode": "phone",
-                "message": "Running whole-image YOLO inference.",
+                "detection_profile": profile_config["profile"],
+                "detection_profile_label": profile_config["label"],
+                "message": f"Running whole-image YOLO inference ({profile_config['label']}).",
             },
             scan_id,
         )
-        result = await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id)
+        result = await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id, profile_config["profile"])
         result["operation_mode"] = "phone"
         await send_packet(websocket, "phone_result", result, scan_id)
     except Exception as exc:
@@ -1230,8 +1241,9 @@ async def api_phone_detect(request: Request) -> dict[str, Any]:
     upload_id = str(payload.get("upload_id", "")).strip()
     if not upload_id:
         raise HTTPException(status_code=400, detail="upload_id is required.")
+    detection_profile = str(payload.get("detection_profile") or payload.get("profile") or "fast").strip()
     try:
-        return await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id)
+        return await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id, detection_profile)
     except camera_trigger.CameraTriggerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1385,6 +1397,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                 if not upload_id:
                     await send_packet(websocket, "phone_error", {"request_id": request_id, "message": "upload_id is required."})
                     continue
+                detection_profile = str(payload.get("detection_profile") or payload.get("profile") or "fast").strip()
 
                 scan_id = str(uuid.uuid4())
                 stop_event = asyncio.Event()
@@ -1394,7 +1407,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                     global active_stop_event
                     async with scan_lock:
                         try:
-                            await run_phone_detection(websocket, scan_id, upload_id, stop_event)
+                            await run_phone_detection(websocket, scan_id, upload_id, stop_event, detection_profile)
                         finally:
                             active_stop_event = None
 

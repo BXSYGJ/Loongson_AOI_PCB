@@ -48,6 +48,7 @@ const state = {
   simulationImages: [],
   phoneUploads: [],
   selectedPhoneUploadId: "",
+  phoneDetectionProfile: "fast",
   phoneResult: null,
   lastStatus: null,
   backendRunning: false,
@@ -120,6 +121,8 @@ const el = {
   refreshPhoneUploadsBtn: document.getElementById("refreshPhoneUploadsBtn"),
   deletePhoneUploadBtn: document.getElementById("deletePhoneUploadBtn"),
   phoneUploadSelect: document.getElementById("phoneUploadSelect"),
+  phoneProfileInputs: document.querySelectorAll('input[name="phoneDetectionProfile"]'),
+  phoneProfileHint: document.getElementById("phoneProfileHint"),
   videoPanel: document.getElementById("videoPanel"),
   videoSpeed: document.getElementById("videoSpeed"),
   videoInferenceFps: document.getElementById("videoInferenceFps"),
@@ -281,6 +284,7 @@ function chooseMode(mode) {
   document.body.dataset.mode = mode;
   el.modeScreen.classList.add("is-hidden");
   el.appShell.classList.remove("is-hidden");
+  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   updateModeUi();
   resetScanUi();
   updatePreviewSource();
@@ -341,6 +345,7 @@ function updateModeUi() {
   setPhysicalControlsEnabled((state.mode === "real" || state.mode === "video") && !state.scanning);
   setCommandHint(handheldMode ? "手持模式可直接启动，不要求滑台回零" : phoneMode ? "请选择手机上传照片后开始整图检测" : "等待运行条件检查", "neutral");
   if (phoneMode) {
+    updatePhoneProfileUi();
     refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
   }
 }
@@ -428,11 +433,38 @@ function phoneUploadLabel(item) {
   if (!item) return "未选择手机照片";
   const size = item.size_bytes ? ` · ${formatBytes(item.size_bytes)}` : "";
   const status = item.status ? ` · ${item.status}` : "";
-  return `${item.name || item.upload_id}${size}${status}`;
+  const profile = item.detection_profile_label ? ` · ${item.detection_profile_label}` : "";
+  return `${item.name || item.upload_id}${size}${status}${profile}`;
 }
 
 function currentPhoneUpload() {
   return state.phoneUploads.find((item) => item.upload_id === state.selectedPhoneUploadId) || null;
+}
+
+function phoneDetectionProfileLabel(profile = state.phoneDetectionProfile) {
+  return profile === "precision" ? "高精模式" : "快速模式";
+}
+
+function phoneDetectionProfileHint(profile = state.phoneDetectionProfile) {
+  return profile === "precision"
+    ? "高精模式会运行多组 tile/imgsz 融合，适合复核，速度较慢。"
+    : "快速模式只运行轻量切片，适合比赛演示和龙芯板默认运行。";
+}
+
+function currentPhoneDetectionProfile() {
+  const checked = Array.prototype.find.call(el.phoneProfileInputs || [], (input) => input.checked);
+  state.phoneDetectionProfile = checked ? checked.value : state.phoneDetectionProfile || "fast";
+  return state.phoneDetectionProfile;
+}
+
+function updatePhoneProfileUi() {
+  const profile = currentPhoneDetectionProfile();
+  if (el.phoneProfileHint) {
+    el.phoneProfileHint.textContent = phoneDetectionProfileHint(profile);
+  }
+  if (state.mode === "phone") {
+    setCommandHint(`当前为${phoneDetectionProfileLabel(profile)}，请选择手机上传照片后开始整图检测`, "neutral");
+  }
 }
 
 function mergePhoneUpload(item) {
@@ -1128,13 +1160,18 @@ function drawDetectionOverlay(ctx, defects, rect, image, tone = "#c43c3c") {
     const by = rect.y + (y1 / imageH) * rect.h;
     const bw = Math.max(2, ((x2 - x1) / imageW) * rect.w);
     const bh = Math.max(2, ((y2 - y1) / imageH) * rect.h);
-    ctx.strokeStyle = tone;
+    const decision = defect.decision || "confirmed";
+    const defectTone = decision === "suspected" ? "#b7791f" : tone;
+    ctx.strokeStyle = defectTone;
+    ctx.setLineDash(decision === "suspected" ? [6, 4] : []);
     ctx.strokeRect(bx, by, bw, bh);
-    const label = `${defect.label || defect.type || "defect"} ${Math.round((defect.confidence || 0) * 100)}%`;
+    ctx.setLineDash([]);
+    const prefix = decision === "suspected" ? "suspected " : "";
+    const label = `${prefix}${defect.label || defect.type || "defect"} ${Math.round((defect.confidence || 0) * 100)}%`;
     const labelW = ctx.measureText(label).width + 10;
     ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
     ctx.fillRect(bx, Math.max(rect.y, by - 18), labelW, 18);
-    ctx.fillStyle = tone;
+    ctx.fillStyle = defectTone;
     ctx.fillText(label, bx + 5, Math.max(rect.y + 13, by - 5));
   }
   ctx.restore();
@@ -1506,12 +1543,16 @@ function renderDefects(defects, row, col) {
 
   for (const defect of all.slice(-40).reverse()) {
     const item = document.createElement("div");
-    item.className = "defect-item";
+    const decision = defect.decision || "confirmed";
+    item.className = `defect-item ${decision === "suspected" ? "suspected" : "confirmed"}`;
     const image = defect.annotated_image ? artifactUrl(defect.annotated_image) : "";
     const timing = defect.inference_ms ? ` · ${Math.round(defect.inference_ms)}ms` : "";
+    const decisionText = decision === "suspected" ? "疑似" : "确认";
+    const support = defect.support_count ? ` · support ${defect.support_count}` : "";
+    const maxConfidence = defect.max_confidence ? ` · max ${Math.round(defect.max_confidence * 100)}%` : "";
     item.innerHTML = `
       <div class="thumb"${image ? ` style="background-image:url('${image}')"` : ""}></div>
-      <div><strong>${escapeHtml(defect.label || defect.type || "unknown")}</strong><br><span>cell ${escapeHtml(defect.cell)} · bbox ${escapeHtml(JSON.stringify(defect.bbox || []))}${timing}</span></div>
+      <div><strong>${escapeHtml(decisionText)} · ${escapeHtml(defect.label || defect.type || "unknown")}</strong><br><span>cell ${escapeHtml(defect.cell)} · bbox ${escapeHtml(JSON.stringify(defect.bbox || []))}${support}${maxConfidence}${timing}</span></div>
       <span>${Math.round((defect.confidence || 0) * 100)}%</span>
     `;
     el.defectList.append(item);
@@ -1790,9 +1831,9 @@ function handlePacket(packet) {
     case "phone_detecting":
       el.phaseValue.textContent = "Phone Detecting";
       el.debounceValue.textContent = "Whole image";
-      setCommandHint(payload.message || "手机照片整图 YOLO 推理中", "good");
+      setCommandHint(payload.message || `手机照片整图 YOLO 推理中（${payload.detection_profile_label || phoneDetectionProfileLabel()}）`, "good");
       el.progressBar.style.width = "45%";
-      logEvent(`phone_detecting ${payload.upload_id || ""}`);
+      logEvent(`phone_detecting ${payload.upload_id || ""} ${payload.detection_profile_label || ""}`);
       break;
     case "phone_result":
       state.scanning = false;
@@ -1807,11 +1848,11 @@ function handlePacket(packet) {
       renderDefects([], 0, 0);
       el.progressBar.style.width = "100%";
       el.phaseValue.textContent = "Phone Complete";
-      setCommandHint("手机照片检测完成", "good");
+      setCommandHint(`手机照片检测完成：${payload.detection_profile_label || phoneDetectionProfileLabel(payload.detection_profile)}`, "good");
       showPreviewImage("手机", "整图", payload.annotated_image || payload.raw_image, "手机整图检测结果");
       drawCanvas();
       refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
-      logEvent(`phone_result defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
+      logEvent(`phone_result ${payload.detection_profile_label || ""} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
       break;
     case "phone_error":
       state.scanning = false;
@@ -1958,12 +1999,14 @@ async function startScan() {
 
   if (state.mode === "phone") {
     const item = currentPhoneUpload();
+    const detectionProfile = currentPhoneDetectionProfile();
     state.plan = buildPhonePlan(item);
     updatePlanUi();
     drawCanvas();
     updatePreviewSource();
     const sent = send("start_phone_detection", {
       upload_id: state.selectedPhoneUploadId,
+      detection_profile: detectionProfile,
     });
     if (!sent) {
       state.backendRunning = false;
@@ -2134,6 +2177,12 @@ if (el.phoneUploadSelect) {
     setPhoneUpload(el.phoneUploadSelect.value);
   });
 }
+Array.prototype.forEach.call(el.phoneProfileInputs || [], (input) => {
+  input.addEventListener("change", () => {
+    updatePhoneProfileUi();
+    logEvent(`手机检测模式切换为 ${phoneDetectionProfileLabel()}`);
+  });
+});
 if (el.phoneImageFile) {
   el.phoneImageFile.addEventListener("change", () => {
     const files = Array.from(el.phoneImageFile.files || []);

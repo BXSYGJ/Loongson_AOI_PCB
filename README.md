@@ -14,25 +14,25 @@ mock/simulation flow, or connect the UI to the hardware and algorithm branches.
 
 ## Main Files
 
-| File | Purpose |
-| --- | --- |
-| `main.py` | FastAPI app, WebSocket control protocol, scan orchestration |
-| `camera_trigger.py` | Camera manager, YOLO detector, still capture, video detection session |
-| `motor_controller.py` | UI-side motor interface used by scan commands |
-| `static/index.html` | Browser shell |
-| `static/app.js` | Frontend state machine, WebSocket client, mode logic |
-| `static/styles.css` | White industrial UI styling |
-| `requirements.txt` | Python runtime dependencies |
+| File                    | Purpose                                                               |
+| ----------------------- | --------------------------------------------------------------------- |
+| `main.py`             | FastAPI app, WebSocket control protocol, scan orchestration           |
+| `camera_trigger.py`   | Camera manager, YOLO detector, still capture, video detection session |
+| `motor_controller.py` | UI-side motor interface used by scan commands                         |
+| `static/index.html`   | Browser shell                                                         |
+| `static/app.js`       | Frontend state machine, WebSocket client, mode logic                  |
+| `static/styles.css`   | White industrial UI styling                                           |
+| `requirements.txt`    | Python runtime dependencies                                           |
 
 ## Modes
 
-| Mode | Hardware Needed | Behavior |
-| --- | --- | --- |
-| Handheld detection | Camera + YOLO | No slide movement. The camera can be moved by hand and the video stream shows live YOLO boxes. |
-| Simulation mode | Existing PCB image | Upload one or more PCB images and simulate a snake-grid slide scan over the image. |
-| Real mode | Camera + slide table + YOLO | Step the slide to each grid cell, settle, capture one image, run YOLO, then move to the next cell. |
-| Video detection | Camera + slide table + YOLO | Continuous snake scan with live YOLO video and a moving FOV box on the PCB board. |
-| Phone photo | Phone browser + YOLO | Upload phone photos from the same LAN, convert color images to grayscale, then run whole-board tiled YOLO detection. |
+| Mode               | Hardware Needed             | Behavior                                                                                                             |
+| ------------------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Handheld detection | Camera + YOLO               | No slide movement. The camera can be moved by hand and the video stream shows live YOLO boxes.                       |
+| Simulation mode    | Existing PCB image          | Upload one or more PCB images and simulate a snake-grid slide scan over the image.                                   |
+| Real mode          | Camera + slide table + YOLO | Step the slide to each grid cell, settle, capture one image, run YOLO, then move to the next cell.                   |
+| Video detection    | Camera + slide table + YOLO | Continuous snake scan with live YOLO video and a moving FOV box on the PCB board.                                    |
+| Phone photo        | Phone browser + YOLO        | Upload phone photos from the same LAN, convert color images to grayscale, then run whole-board tiled YOLO detection. |
 
 ## Quick Start on Windows
 
@@ -132,24 +132,37 @@ Phone uploads are normalized before inference:
 - server-side grayscale conversion as a second safety check
 - original board dimensions are preserved for UI display and box coordinates
 - YOLO inference uses in-memory tiled detection rather than resizing the board
-- several tile profiles are tested, and the profile with the highest detection
-  confidence is used for the final annotated image and JSON
+- the website offers two detection profiles: `快速模式` for normal demos and
+  `高精模式` for slower multi-profile review
 
-Default tiled detection settings:
+Default fast profile settings:
 
 ```powershell
-$env:LOONGSON_AOI_PHONE_TILE_SIZES = "512,640,800"
-$env:LOONGSON_AOI_PHONE_IMGSZS = "960"
-$env:LOONGSON_AOI_PHONE_TILE_OVERLAP = "0.5"
+$env:LOONGSON_AOI_PHONE_FAST_TILE_SIZES = "640"
+$env:LOONGSON_AOI_PHONE_FAST_IMGSZS = "640"
+$env:LOONGSON_AOI_PHONE_FAST_TILE_OVERLAP = "0.5"
 ```
 
-The `640` tile keeps compatibility with the training image size. The `512` and
-`800` tiles give the detector alternate object scales when phone photos are
-cropped or framed differently from the dataset. To force the old single-scale
-behavior:
+High-precision profile settings:
 
 ```powershell
-$env:LOONGSON_AOI_PHONE_TILE_SIZE = "640"
+$env:LOONGSON_AOI_PHONE_PRECISION_TILE_SIZES = "512,640,800"
+$env:LOONGSON_AOI_PHONE_PRECISION_IMGSZS = "640,960"
+$env:LOONGSON_AOI_PHONE_PRECISION_TILE_OVERLAP = "0.5"
+```
+
+The fast profile keeps latency low for the Loongson board by running one light
+tile/imgsz profile while retaining 50% overlap to avoid missing defects near
+tile borders. The high-precision profile tests several tile/imgsz profiles,
+then fuses overlapping boxes so repeated medium-confidence evidence can become
+a confirmed defect while weaker one-off evidence is kept as suspected. Fusion
+thresholds can be tuned without code changes:
+
+```powershell
+$env:LOONGSON_AOI_PHONE_CONFIRM_CONF = "0.5"
+$env:LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF = "0.35"
+$env:LOONGSON_AOI_PHONE_SUSPECTED_CONF = "0.2"
+$env:LOONGSON_AOI_PHONE_FUSION_IOU = "0.45"
 ```
 
 Phone outputs are written under:
@@ -179,22 +192,22 @@ soft-homed before scanning when no limit switches are installed.
 
 ## HTTP Interfaces
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /` | Web console |
-| `GET /health` | Server health check |
-| `GET /api/system/status` | Motor, camera, algorithm, and scan readiness |
-| `GET /api/camera/status` | Camera open state and latest capture metadata |
-| `GET /api/camera/stream.mjpg` | Raw camera preview stream |
-| `GET /api/video/status` | Live YOLO video session status |
-| `GET /api/video/stream.mjpg` | Annotated YOLO video stream |
-| `POST /api/simulation/upload` | Upload PCB images for simulation mode |
-| `GET /phone` | Minimal phone upload page |
-| `POST /api/phone/upload` | Upload phone camera/gallery images |
-| `GET /api/phone/uploads` | List phone upload queue |
-| `POST /api/phone/detect` | Run tiled whole-board YOLO detection on a phone upload |
-| `DELETE /api/phone/uploads/{upload_id}` | Delete a phone upload record and files |
-| `WS /ws/control` | Start/stop scan commands and live events |
+| Endpoint                                  | Purpose                                                |
+| ----------------------------------------- | ------------------------------------------------------ |
+| `GET /`                                 | Web console                                            |
+| `GET /health`                           | Server health check                                    |
+| `GET /api/system/status`                | Motor, camera, algorithm, and scan readiness           |
+| `GET /api/camera/status`                | Camera open state and latest capture metadata          |
+| `GET /api/camera/stream.mjpg`           | Raw camera preview stream                              |
+| `GET /api/video/status`                 | Live YOLO video session status                         |
+| `GET /api/video/stream.mjpg`            | Annotated YOLO video stream                            |
+| `POST /api/simulation/upload`           | Upload PCB images for simulation mode                  |
+| `GET /phone`                            | Minimal phone upload page                              |
+| `POST /api/phone/upload`                | Upload phone camera/gallery images                     |
+| `GET /api/phone/uploads`                | List phone upload queue                                |
+| `POST /api/phone/detect`                | Run tiled whole-board YOLO detection on a phone upload |
+| `DELETE /api/phone/uploads/{upload_id}` | Delete a phone upload record and files                 |
+| `WS /ws/control`                        | Start/stop scan commands and live events               |
 
 ## Validation
 

@@ -180,6 +180,7 @@ class ScanMosaicTests(unittest.TestCase):
                 upload_dir / "annotated.jpg",
                 upload_dir / "result.json",
                 tile_size=32,
+                imgsz=960,
                 overlap=0.0,
             )
 
@@ -227,10 +228,11 @@ class ScanMosaicTests(unittest.TestCase):
                 upload_dir / "annotated.jpg",
                 upload_dir / "result.json",
                 tile_size=[32, 40],
+                imgsz=960,
                 overlap=0.0,
             )
 
-            self.assertEqual(details["strategy"], "best_confidence_profile")
+            self.assertEqual(details["strategy"], "profile_ensemble")
             self.assertEqual(details["tile_sizes"], [32, 40])
             self.assertEqual(details["selected_profile"]["tile_size"], 40)
             self.assertEqual(details["tile_count"], 5)
@@ -242,30 +244,36 @@ class ScanMosaicTests(unittest.TestCase):
             if upload_dir.exists():
                 remove_tree_retry(upload_dir)
 
-    def test_tiled_phone_detection_selects_highest_confidence_profile(self):
-        upload_id = f"unit-phone-best-profile-{uuid.uuid4().hex[:8]}"
+    def test_tiled_phone_detection_fuses_repeated_profile_evidence(self):
+        upload_id = f"unit-phone-profile-fusion-{uuid.uuid4().hex[:8]}"
         upload_dir = camera_trigger.PHONE_UPLOAD_DIR / upload_id
         if upload_dir.exists():
             remove_tree_retry(upload_dir)
 
         class FakeDetector:
             def detect_frame(self, frame, annotated_path=None, imgsz=None):
-                if frame.shape[0] == 32 and frame.shape[1] == 32:
+                if imgsz == 640:
                     return [
                         {
                             "type": "short_circuit",
                             "label": "short_circuit",
-                            "bbox": [2, 2, 12, 12],
-                            "confidence": 0.52,
-                        }
-                    ], frame.copy(), 1.0
-                if frame.shape[0] == 40 and frame.shape[1] == 40:
-                    return [
+                            "bbox": [10, 10, 22, 22],
+                            "confidence": 0.34,
+                        },
                         {
                             "type": "improper_installation",
                             "label": "improper_installation",
-                            "bbox": [10, 11, 20, 22],
-                            "confidence": 0.88,
+                            "bbox": [25, 25, 35, 35],
+                            "confidence": 0.24,
+                        },
+                    ], frame.copy(), 1.0
+                if imgsz == 960:
+                    return [
+                        {
+                            "type": "short_circuit",
+                            "label": "short_circuit",
+                            "bbox": [11, 11, 23, 23],
+                            "confidence": 0.36,
                         }
                     ], frame.copy(), 1.0
                 return [], frame.copy(), 1.0
@@ -282,15 +290,114 @@ class ScanMosaicTests(unittest.TestCase):
                 raw_path,
                 upload_dir / "annotated.jpg",
                 upload_dir / "result.json",
-                tile_size=[32, 40],
+                tile_size=40,
+                imgsz=[640, 960],
                 overlap=0.0,
             )
 
-            self.assertEqual(details["strategy"], "best_confidence_profile")
-            self.assertEqual(details["selected_profile"]["tile_size"], 40)
-            self.assertEqual(len(detections), 1)
-            self.assertEqual(detections[0]["type"], "improper_installation")
-            self.assertEqual(detections[0]["confidence"], 0.88)
+            self.assertEqual(details["strategy"], "profile_ensemble")
+            self.assertEqual(details["confirmed_count"], 1)
+            self.assertEqual(details["suspected_count"], 1)
+            self.assertEqual(len(detections), 2)
+
+            confirmed = details["confirmed_defects"][0]
+            self.assertEqual(confirmed["type"], "short_circuit")
+            self.assertEqual(confirmed["decision"], "confirmed")
+            self.assertEqual(confirmed["support_count"], 2)
+            self.assertGreaterEqual(confirmed["confidence"], 0.4)
+            self.assertEqual({profile["imgsz"] for profile in confirmed["source_profiles"]}, {640, 960})
+
+            suspected = details["suspected_defects"][0]
+            self.assertEqual(suspected["type"], "improper_installation")
+            self.assertEqual(suspected["decision"], "suspected")
+            self.assertEqual(suspected["support_count"], 1)
+        finally:
+            camera_trigger.yolo_detector = original_detector
+            if upload_dir.exists():
+                remove_tree_retry(upload_dir)
+
+    def test_phone_upload_detection_uses_fast_profile_by_default(self):
+        upload_id = f"unit-phone-fast-profile-{uuid.uuid4().hex[:8]}"
+        upload_dir = camera_trigger.PHONE_UPLOAD_DIR / upload_id
+        if upload_dir.exists():
+            remove_tree_retry(upload_dir)
+
+        class FakeDetector:
+            def __init__(self):
+                self.calls = []
+
+            def detect_frame(self, frame, annotated_path=None, imgsz=None):
+                self.calls.append((frame.shape[1], frame.shape[0], imgsz))
+                return [], frame.copy(), 1.0
+
+        original_detector = camera_trigger.yolo_detector
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = upload_dir / "raw.jpg"
+            image = np.full((80, 80, 3), 80, dtype=np.uint8)
+            cv2.imwrite(str(raw_path), image)
+            metadata = {
+                "upload_id": upload_id,
+                "name": "fast.jpg",
+                "raw_image": camera_trigger._rel(raw_path),
+                "status": "uploaded",
+            }
+            camera_trigger._write_phone_metadata(metadata)
+
+            detector = FakeDetector()
+            camera_trigger.yolo_detector = detector
+            result = camera_trigger.detect_phone_upload(upload_id)
+
+            self.assertEqual(result["detection_profile"], "fast")
+            self.assertEqual(result["detection_profile_label"], "快速模式")
+            self.assertEqual(result["detection_details"]["tile_sizes"], [640])
+            self.assertEqual(result["detection_details"]["imgszs"], [640])
+            self.assertEqual(result["detection_details"]["tile_overlap"], 0.5)
+            self.assertEqual(len(detector.calls), 1)
+            self.assertEqual(detector.calls[0][2], 640)
+        finally:
+            camera_trigger.yolo_detector = original_detector
+            if upload_dir.exists():
+                remove_tree_retry(upload_dir)
+
+    def test_phone_upload_detection_uses_precision_profile_when_requested(self):
+        upload_id = f"unit-phone-precision-profile-{uuid.uuid4().hex[:8]}"
+        upload_dir = camera_trigger.PHONE_UPLOAD_DIR / upload_id
+        if upload_dir.exists():
+            remove_tree_retry(upload_dir)
+
+        class FakeDetector:
+            def __init__(self):
+                self.calls = []
+
+            def detect_frame(self, frame, annotated_path=None, imgsz=None):
+                self.calls.append((frame.shape[1], frame.shape[0], imgsz))
+                return [], frame.copy(), 1.0
+
+        original_detector = camera_trigger.yolo_detector
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = upload_dir / "raw.jpg"
+            image = np.full((80, 80, 3), 80, dtype=np.uint8)
+            cv2.imwrite(str(raw_path), image)
+            metadata = {
+                "upload_id": upload_id,
+                "name": "precision.jpg",
+                "raw_image": camera_trigger._rel(raw_path),
+                "status": "uploaded",
+            }
+            camera_trigger._write_phone_metadata(metadata)
+
+            detector = FakeDetector()
+            camera_trigger.yolo_detector = detector
+            result = camera_trigger.detect_phone_upload(upload_id, detection_profile="precision")
+
+            self.assertEqual(result["detection_profile"], "precision")
+            self.assertEqual(result["detection_profile_label"], "高精模式")
+            self.assertEqual(result["detection_details"]["tile_sizes"], [512, 640, 800])
+            self.assertEqual(result["detection_details"]["imgszs"], [640, 960])
+            self.assertEqual(result["detection_details"]["tile_overlap"], 0.5)
+            self.assertEqual(len(detector.calls), 6)
         finally:
             camera_trigger.yolo_detector = original_detector
             if upload_dir.exists():
