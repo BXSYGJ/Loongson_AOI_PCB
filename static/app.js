@@ -27,6 +27,13 @@ const MODE_META = {
     previewSource: "OV9281 + YOLO 标注流",
     motionNote: "当前模式会连续移动滑台；请先手动到物理原点并执行三轴回零。",
   },
+  phone: {
+    label: "手机拍照",
+    description: "同一局域网手机拍照上传 PCB 图片，电脑端选择照片后执行整图 YOLO 检测。",
+    previewTitle: "手机上传图预览",
+    previewSource: "手机上传照片",
+    motionNote: "手机拍照模式不使用相机和滑台；手机只上传，电脑端人工选择后整图检测。",
+  },
 };
 
 const state = {
@@ -39,11 +46,16 @@ const state = {
   mode: null,
   simulationImagePath: "",
   simulationImages: [],
+  phoneUploads: [],
+  selectedPhoneUploadId: "",
+  phoneResult: null,
   lastStatus: null,
   backendRunning: false,
   previewOverride: null,
   videoPosition: null,
   videoTrail: [],
+  imageCache: new Map(),
+  mosaic: null,
 };
 
 function ensureModeCards() {
@@ -100,6 +112,14 @@ const el = {
   originY: document.getElementById("originY"),
   imagePath: document.getElementById("imagePath"),
   simulationPanel: document.getElementById("simulationPanel"),
+  phonePanel: document.getElementById("phonePanel"),
+  phoneUploadUrls: document.getElementById("phoneUploadUrls"),
+  phoneImageFile: document.getElementById("phoneImageFile"),
+  uploadPhoneBtn: document.getElementById("uploadPhoneBtn"),
+  phoneUploadStatus: document.getElementById("phoneUploadStatus"),
+  refreshPhoneUploadsBtn: document.getElementById("refreshPhoneUploadsBtn"),
+  deletePhoneUploadBtn: document.getElementById("deletePhoneUploadBtn"),
+  phoneUploadSelect: document.getElementById("phoneUploadSelect"),
   videoPanel: document.getElementById("videoPanel"),
   videoSpeed: document.getElementById("videoSpeed"),
   videoInferenceFps: document.getElementById("videoInferenceFps"),
@@ -164,6 +184,27 @@ function escapeHtml(value) {
 function artifactUrl(path) {
   if (!path) return "";
   return `/api/artifact?path=${encodeURIComponent(path)}`;
+}
+
+function cachedArtifactImage(path) {
+  if (!path) return null;
+  const key = artifactUrl(path);
+  let record = state.imageCache.get(key);
+  if (!record) {
+    const image = new Image();
+    record = { image, loaded: false, error: false };
+    image.addEventListener("load", () => {
+      record.loaded = true;
+      drawCanvas();
+    });
+    image.addEventListener("error", () => {
+      record.error = true;
+      drawCanvas();
+    });
+    image.src = key;
+    state.imageCache.set(key, record);
+  }
+  return record.loaded && !record.error ? record.image : null;
 }
 
 function cellKey(row, col) {
@@ -267,14 +308,18 @@ function updateModeUi() {
     card.classList.toggle("selected", card.dataset.mode === state.mode);
   });
   el.simulationPanel.classList.toggle("is-hidden", state.mode !== "simulation");
+  if (el.phonePanel) {
+    el.phonePanel.classList.toggle("is-hidden", state.mode !== "phone");
+  }
   if (el.simulationSourceSelect) {
     el.simulationSourceSelect.classList.toggle("is-hidden", state.mode !== "simulation");
   }
   el.videoPanel.classList.toggle("is-hidden", !(state.mode === "video" || state.mode === "handheld"));
   const videoMode = state.mode === "video";
   const handheldMode = state.mode === "handheld";
+  const phoneMode = state.mode === "phone";
   for (const input of [el.pcbLength, el.pcbWidth, el.originX, el.originY]) {
-    input.disabled = videoMode || handheldMode;
+    input.disabled = videoMode || handheldMode || phoneMode;
   }
   if (el.videoSpeed) el.videoSpeed.disabled = handheldMode;
   if (el.videoOverlap) el.videoOverlap.disabled = handheldMode;
@@ -285,14 +330,19 @@ function updateModeUi() {
   }
   el.eventFlowText.textContent = handheldMode
     ? "camera_frame → detect_inference → handheld_detection"
-    : videoMode
-      ? "continuous_move → video_position → detect_inference → video_detection"
-      : "move_xy → debounce → capture_frame → detect_inference → result";
+    : phoneMode
+      ? "phone_upload → phone_detecting → phone_result"
+      : videoMode
+        ? "continuous_move → video_position → detect_inference → video_detection"
+        : "move_xy → debounce → capture_frame → detect_inference → result";
   if (!state.scanning) {
-    el.startBtn.textContent = handheldMode ? "开始手持检测" : videoMode ? "开始视频检测" : "开始检测";
+    el.startBtn.textContent = handheldMode ? "开始手持检测" : phoneMode ? "开始整图检测" : videoMode ? "开始视频检测" : "开始检测";
   }
   setPhysicalControlsEnabled((state.mode === "real" || state.mode === "video") && !state.scanning);
-  setCommandHint(handheldMode ? "手持模式可直接启动，不要求滑台回零" : "等待运行条件检查", "neutral");
+  setCommandHint(handheldMode ? "手持模式可直接启动，不要求滑台回零" : phoneMode ? "请选择手机上传照片后开始整图检测" : "等待运行条件检查", "neutral");
+  if (phoneMode) {
+    refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
+  }
 }
 
 function setPhysicalControlsEnabled(enabled) {
@@ -374,6 +424,290 @@ function setSimulationSource(path, options = {}) {
   return true;
 }
 
+function phoneUploadLabel(item) {
+  if (!item) return "未选择手机照片";
+  const size = item.size_bytes ? ` · ${formatBytes(item.size_bytes)}` : "";
+  const status = item.status ? ` · ${item.status}` : "";
+  return `${item.name || item.upload_id}${size}${status}`;
+}
+
+function currentPhoneUpload() {
+  return state.phoneUploads.find((item) => item.upload_id === state.selectedPhoneUploadId) || null;
+}
+
+function mergePhoneUpload(item) {
+  if (!item || !item.upload_id) return null;
+  const index = state.phoneUploads.findIndex((entry) => entry.upload_id === item.upload_id);
+  if (index >= 0) {
+    state.phoneUploads[index] = Object.assign({}, state.phoneUploads[index], item);
+  } else {
+    state.phoneUploads.unshift(item);
+  }
+  renderPhoneUploads();
+  return state.phoneUploads.find((entry) => entry.upload_id === item.upload_id) || item;
+}
+
+function buildPhonePlan(item = currentPhoneUpload()) {
+  return {
+    scan_type: "phone",
+    rows: 1,
+    cols: 1,
+    total_cells: 1,
+    image_name: item ? item.name || item.upload_id : "",
+    image_width: item && item.width ? item.width : 0,
+    image_height: item && item.height ? item.height : 0,
+  };
+}
+
+function renderPhoneUploadUrls(urls = []) {
+  if (!el.phoneUploadUrls) return;
+  el.phoneUploadUrls.innerHTML = "";
+  const values = urls.length ? urls : ["/phone"];
+  for (const url of values) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = url;
+    el.phoneUploadUrls.append(link);
+  }
+}
+
+function renderPhoneUploads() {
+  if (!el.phoneUploadSelect) return;
+  el.phoneUploadSelect.innerHTML = "";
+  if (!state.phoneUploads.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无手机上传照片";
+    el.phoneUploadSelect.append(option);
+    el.phoneUploadSelect.disabled = true;
+    if (el.deletePhoneUploadBtn) el.deletePhoneUploadBtn.disabled = true;
+    return;
+  }
+
+  el.phoneUploadSelect.disabled = false;
+  if (el.deletePhoneUploadBtn) el.deletePhoneUploadBtn.disabled = false;
+  for (const item of state.phoneUploads) {
+    const option = document.createElement("option");
+    option.value = item.upload_id;
+    option.textContent = phoneUploadLabel(item);
+    el.phoneUploadSelect.append(option);
+  }
+  if (!state.selectedPhoneUploadId || !currentPhoneUpload()) {
+    state.selectedPhoneUploadId = state.phoneUploads[0].upload_id;
+  }
+  el.phoneUploadSelect.value = state.selectedPhoneUploadId;
+}
+
+function setPhoneUpload(uploadId, options = {}) {
+  const item = state.phoneUploads.find((entry) => entry.upload_id === uploadId) || null;
+  state.selectedPhoneUploadId = item ? item.upload_id : "";
+  state.phoneResult = item && item.annotated_image ? item : null;
+  renderPhoneUploads();
+  if (state.mode === "phone") {
+    state.plan = buildPhonePlan(item);
+    state.results.clear();
+    if (item && item.defects) {
+      state.results.set("phone", decorateDefects(item.defects || [], item));
+    }
+    updatePlanUi();
+    renderDefects([], 0, 0);
+    updatePreviewSource();
+    drawCanvas();
+  }
+  if (item && options.log !== false) {
+    logEvent(`手机照片已选择 ${item.name || item.upload_id}`);
+  }
+  return Boolean(item);
+}
+
+async function refreshPhoneUploads(options = {}) {
+  if (!el.phoneUploadStatus) return [];
+  try {
+    const response = await fetch("/api/phone/uploads");
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `phone uploads ${response.status}`);
+    }
+    const payload = await response.json();
+    state.phoneUploads = Array.isArray(payload.uploads) ? payload.uploads : [];
+    const previous = options.preserveSelection ? state.selectedPhoneUploadId : "";
+    if (previous && state.phoneUploads.some((item) => item.upload_id === previous)) {
+      state.selectedPhoneUploadId = previous;
+    } else if (options.selectLatest !== false && state.phoneUploads.length) {
+      state.selectedPhoneUploadId = state.phoneUploads[0].upload_id;
+    } else if (!state.phoneUploads.length) {
+      state.selectedPhoneUploadId = "";
+    }
+    renderPhoneUploads();
+    const item = currentPhoneUpload();
+    if (state.mode === "phone") {
+      state.plan = buildPhonePlan(item);
+      if (item && item.defects) {
+        state.results.set("phone", decorateDefects(item.defects || [], item));
+      } else {
+        state.results.delete("phone");
+      }
+      updatePlanUi();
+      renderDefects([], 0, 0);
+      updatePreviewSource();
+      drawCanvas();
+    }
+    el.phoneUploadStatus.textContent = state.phoneUploads.length
+      ? `已加载 ${state.phoneUploads.length} 张手机照片`
+      : "等待手机拍照上传";
+    return state.phoneUploads;
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    el.phoneUploadStatus.textContent = `上传队列读取失败：${message}`;
+    logEvent(`phone uploads failed: ${message}`);
+    return [];
+  }
+}
+
+function imageStem(filename) {
+  const dot = filename.lastIndexOf(".");
+  return dot > 0 ? filename.slice(0, dot) : filename || "phone-pcb";
+}
+
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("图片无法在浏览器端解码"));
+    };
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality);
+  });
+}
+
+function convertCanvasToGrayscale(ctx, width, height) {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = Math.round(data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114);
+    data[index] = gray;
+    data[index + 1] = gray;
+    data[index + 2] = gray;
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+async function compressImageForUpload(file) {
+  const maxDimension = 1600;
+  const quality = 0.82;
+  if (!file.type || !file.type.startsWith("image/")) {
+    return { blob: file, filename: file.name, compressed: false, grayscale: false, originalSize: file.size, uploadSize: file.size };
+  }
+
+  const image = await loadImageElement(file);
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+  ctx.drawImage(image, 0, 0, width, height);
+  convertCanvasToGrayscale(ctx, width, height);
+  const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+  if (!blob) {
+    return { blob: file, filename: file.name, compressed: false, grayscale: false, originalSize: file.size, uploadSize: file.size };
+  }
+  return {
+    blob,
+    filename: `${imageStem(file.name)}.jpg`,
+    compressed: blob.size < file.size,
+    grayscale: true,
+    originalSize: file.size,
+    uploadSize: blob.size,
+  };
+}
+
+async function uploadPhoneImages() {
+  const files = Array.from((el.phoneImageFile && el.phoneImageFile.files) || []);
+  if (!files.length) {
+    el.phoneUploadStatus.textContent = "请先选择一张或多张手机照片";
+    return;
+  }
+
+  el.uploadPhoneBtn.disabled = true;
+  const uploaded = [];
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      el.phoneUploadStatus.textContent = `正在转灰度并压缩 ${index + 1}/${files.length}：${file.name}`;
+      const prepared = await compressImageForUpload(file);
+      el.phoneUploadStatus.textContent = prepared.grayscale
+        ? `已转灰度 ${formatBytes(prepared.originalSize)} → ${formatBytes(prepared.uploadSize)}，正在上传 ${index + 1}/${files.length}`
+        : `正在上传 ${index + 1}/${files.length}：${file.name}`;
+      const response = await fetch(`/api/phone/upload?filename=${encodeURIComponent(prepared.filename)}`, {
+        method: "POST",
+        headers: { "Content-Type": prepared.blob.type || file.type || "application/octet-stream" },
+        body: prepared.blob,
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `upload ${response.status}`);
+      }
+      uploaded.push(await response.json());
+    }
+    await refreshPhoneUploads({ selectLatest: true });
+    if (uploaded.length) {
+      setPhoneUpload(uploaded[0].upload_id, { log: true });
+    }
+    el.phoneUploadStatus.textContent = `已上传 ${uploaded.length} 张手机照片`;
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    el.phoneUploadStatus.textContent = `上传失败：${message}`;
+    logEvent(`phone upload failed: ${message}`);
+  } finally {
+    el.uploadPhoneBtn.disabled = false;
+    if (el.phoneImageFile) el.phoneImageFile.value = "";
+  }
+}
+
+async function deleteSelectedPhoneUpload() {
+  const uploadId = state.selectedPhoneUploadId;
+  if (!uploadId) {
+    el.phoneUploadStatus.textContent = "请先选择要删除的手机照片";
+    return;
+  }
+
+  el.deletePhoneUploadBtn.disabled = true;
+  try {
+    const response = await fetch(`/api/phone/uploads/${encodeURIComponent(uploadId)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `delete ${response.status}`);
+    }
+    state.results.delete("phone");
+    state.phoneResult = null;
+    await refreshPhoneUploads({ selectLatest: true });
+    el.phoneUploadStatus.textContent = "已删除选中手机照片";
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    el.phoneUploadStatus.textContent = `删除失败：${message}`;
+    logEvent(`phone delete failed: ${message}`);
+  } finally {
+    el.deletePhoneUploadBtn.disabled = false;
+  }
+}
+
 function updatePreviewSource() {
   state.previewOverride = null;
   if (state.mode === "simulation") {
@@ -391,6 +725,21 @@ function updatePreviewSource() {
       el.cameraPreview.removeAttribute("src");
       el.cameraPreviewStatus.textContent = "等待导入 PCB 图片";
       updateOriginalPcbPreview(null);
+    }
+    return;
+  }
+  if (state.mode === "phone") {
+    const item = currentPhoneUpload();
+    el.reloadCameraBtn.textContent = "刷新";
+    el.previewTitle.textContent = MODE_META.phone.previewTitle;
+    el.previewSourceText.textContent = item ? `手机照片：${item.name || item.upload_id}` : MODE_META.phone.previewSource;
+    if (item) {
+      const imagePath = item.annotated_image || item.raw_image;
+      el.cameraPreviewStatus.textContent = item.annotated_image ? "已显示手机检测标注图" : "已显示手机上传原图";
+      el.cameraPreview.src = artifactUrl(imagePath);
+    } else {
+      el.cameraPreview.removeAttribute("src");
+      el.cameraPreviewStatus.textContent = "等待手机上传或本机选择图片";
     }
     return;
   }
@@ -530,6 +879,13 @@ async function previewGrid() {
     return;
   }
 
+  if (state.mode === "phone") {
+    state.plan = buildPhonePlan(currentPhoneUpload());
+    updatePlanUi();
+    drawCanvas();
+    return;
+  }
+
   if (state.mode === "video") {
     const status = state.lastStatus || await refreshSystemStatus();
     state.plan = buildVideoPlanFromStatus(status);
@@ -608,7 +964,7 @@ function renderSystemStatus(status) {
     ? `已打开 ${runtime.source || ""} ${runtime.width || "-"}x${runtime.height || "-"}`
     : `不可用${runtime.last_error ? `：${runtime.last_error}` : ""}`;
   setStatusText(el.captureStatus, cameraText, runtime.opened ? "ok" : "bad");
-  if (runtime.source && state.mode !== "simulation" && !state.previewOverride) {
+  if (runtime.source && state.mode !== "simulation" && state.mode !== "phone" && !state.previewOverride) {
     const origin = runtime.source_origin ? ` · ${runtime.source_origin}` : "";
     el.previewSourceText.textContent = `OV9281 ${runtime.source}${origin}`;
   }
@@ -635,6 +991,7 @@ function renderSystemStatus(status) {
     }
   }
   renderLanUrls(network.lan_urls || []);
+  renderPhoneUploadUrls(network.phone_urls || []);
 }
 
 function renderLanUrls(urls) {
@@ -676,6 +1033,18 @@ function updatePlanUi() {
     el.xyReadout.textContent = "无坐标";
     return;
   }
+  if (state.plan.scan_type === "phone") {
+    el.rowsValue.textContent = "-";
+    el.colsValue.textContent = "-";
+    el.tilesValue.textContent = state.plan.image_width && state.plan.image_height
+      ? `${state.plan.image_width}x${state.plan.image_height}`
+      : "-";
+    el.gridMeta.textContent = state.plan.image_name
+      ? `手机拍照 · 整图 YOLO · ${state.plan.image_name}`
+      : "手机拍照 · 等待上传照片";
+    el.xyReadout.textContent = "无滑台";
+    return;
+  }
   if (state.plan.scan_type === "continuous_video") {
     el.rowsValue.textContent = state.plan.rows;
     el.colsValue.textContent = "连续";
@@ -689,7 +1058,11 @@ function updatePlanUi() {
   el.colsValue.textContent = state.plan.cols;
   el.tilesValue.textContent = state.plan.total_cells;
   const boundary = state.plan.logical_boundary;
-  el.gridMeta.textContent = `FOV 30mm x 30mm · 覆盖 ${state.plan.covered_mm.length}mm x ${state.plan.covered_mm.width}mm · 溢出 ${boundary.overflow_right_mm}mm / ${boundary.overflow_bottom_mm}mm`;
+  const fov = state.plan.fov_mm || { width: 30, height: 30 };
+  const step = state.plan.step_mm || { x: fov.width, y: fov.height };
+  const covered = state.plan.covered_mm || { length: state.plan.cols * fov.width, width: state.plan.rows * fov.height };
+  const overlap = Math.round((state.plan.overlap || 0) * 100);
+  el.gridMeta.textContent = `FOV ${fov.width}mm x ${fov.height}mm · 步距 ${step.x}mm x ${step.y}mm · 重叠 ${overlap}% · 覆盖 ${covered.length}mm x ${covered.width}mm · 溢出 ${boundary.overflow_right_mm}mm / ${boundary.overflow_bottom_mm}mm`;
 }
 
 function resizeCanvasForDisplay() {
@@ -702,6 +1075,168 @@ function resizeCanvasForDisplay() {
     el.canvas.height = height;
   }
   return { width, height };
+}
+
+function steppedCanvasMetrics(width, height) {
+  const pad = 38;
+  const fov = state.plan.fov_mm || { width: 30, height: 30 };
+  const covered = state.plan.covered_mm || {
+    length: Math.max(1, state.plan.cols || 1) * fov.width,
+    width: Math.max(1, state.plan.rows || 1) * fov.height,
+  };
+  const step = state.plan.step_mm || { x: fov.width, y: fov.height };
+  const origin = state.plan.origin_mm || { x: 0, y: 0 };
+  const logicalW = Math.max(fov.width, Number(covered.length) || fov.width);
+  const logicalH = Math.max(fov.height, Number(covered.width) || fov.height);
+  const scale = Math.min((width - pad * 2) / logicalW, (height - pad * 2) / logicalH);
+  const boardW = logicalW * scale;
+  const boardH = logicalH * scale;
+  const ox = (width - boardW) / 2;
+  const oy = (height - boardH) / 2;
+  return { scale, ox, oy, boardW, boardH, fov, step, origin, covered: { length: logicalW, width: logicalH } };
+}
+
+function steppedCellRect(metrics, row, col) {
+  const xMm = metrics.origin.x + col * metrics.step.x;
+  const yMm = metrics.origin.y + row * metrics.step.y;
+  return {
+    x: metrics.ox + (xMm - metrics.origin.x) * metrics.scale,
+    y: metrics.oy + (yMm - metrics.origin.y) * metrics.scale,
+    w: metrics.fov.width * metrics.scale,
+    h: metrics.fov.height * metrics.scale,
+    x_mm: xMm,
+    y_mm: yMm,
+  };
+}
+
+function drawDetectionOverlay(ctx, defects, rect, image, tone = "#c43c3c") {
+  if (!defects || !defects.length) return;
+  const imageW = image && image.naturalWidth ? image.naturalWidth : 1280;
+  const imageH = image && image.naturalHeight ? image.naturalHeight : 800;
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.font = "12px Microsoft YaHei, Segoe UI, sans-serif";
+  for (const defect of defects) {
+    const bbox = defect.bbox || [];
+    if (bbox.length < 4) continue;
+    const x1 = Number(bbox[0]);
+    const y1 = Number(bbox[1]);
+    const x2 = Number(bbox[2]);
+    const y2 = Number(bbox[3]);
+    if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+    const bx = rect.x + (x1 / imageW) * rect.w;
+    const by = rect.y + (y1 / imageH) * rect.h;
+    const bw = Math.max(2, ((x2 - x1) / imageW) * rect.w);
+    const bh = Math.max(2, ((y2 - y1) / imageH) * rect.h);
+    ctx.strokeStyle = tone;
+    ctx.strokeRect(bx, by, bw, bh);
+    const label = `${defect.label || defect.type || "defect"} ${Math.round((defect.confidence || 0) * 100)}%`;
+    const labelW = ctx.measureText(label).width + 10;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.fillRect(bx, Math.max(rect.y, by - 18), labelW, 18);
+    ctx.fillStyle = tone;
+    ctx.fillText(label, bx + 5, Math.max(rect.y + 13, by - 5));
+  }
+  ctx.restore();
+}
+
+function drawMosaicDetections(ctx, metrics, mosaicImage) {
+  if (!state.mosaic || !state.mosaic.defects || !state.mosaic.defects.length || !mosaicImage) return;
+  drawDetectionOverlay(
+    ctx,
+    state.mosaic.defects,
+    { x: metrics.ox, y: metrics.oy, w: metrics.boardW, h: metrics.boardH },
+    mosaicImage,
+    "#b42318",
+  );
+}
+
+function drawSteppedCanvas(ctx, width, height) {
+  const metrics = steppedCanvasMetrics(width, height);
+  const { ox, oy, boardW, boardH } = metrics;
+  const cols = state.plan.cols;
+  const rows = state.plan.rows;
+  const boundary = state.plan.logical_boundary || {};
+  const mosaicImage = state.mosaic && state.mosaic.mosaic_raw ? cachedArtifactImage(state.mosaic.mosaic_raw) : null;
+
+  ctx.fillStyle = "#e8f3ef";
+  ctx.fillRect(ox, oy, boardW, boardH);
+
+  if (mosaicImage) {
+    ctx.drawImage(mosaicImage, ox, oy, boardW, boardH);
+  } else {
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        const key = `${row}:${col}`;
+        const artifact = state.cellArtifacts.get(key);
+        const rect = steppedCellRect(metrics, row, col);
+        const image = artifact && artifact.raw_image ? cachedArtifactImage(artifact.raw_image) : null;
+        const cellDefects = state.results.get(key) || (artifact && artifact.defects) || [];
+        const hasDefect = cellDefects && cellDefects.length > 0;
+
+        if (image) {
+          ctx.drawImage(image, rect.x, rect.y, rect.w, rect.h);
+          ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
+          ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+        } else {
+          ctx.fillStyle = hasDefect
+            ? "rgba(209, 67, 67, 0.18)"
+            : artifact
+              ? "rgba(33, 128, 87, 0.16)"
+              : "rgba(33, 128, 87, 0.07)";
+          ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+        }
+
+        if (hasDefect) {
+          ctx.fillStyle = "rgba(209, 67, 67, 0.12)";
+          ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+          drawDetectionOverlay(ctx, cellDefects, rect, image);
+        }
+      }
+    }
+  }
+
+  ctx.strokeStyle = "#1769aa";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ox, oy, boardW, boardH);
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const rect = steppedCellRect(metrics, row, col);
+      const key = `${row}:${col}`;
+      const artifact = state.cellArtifacts.get(key);
+      const cellDefects = state.results.get(key) || (artifact && artifact.defects) || [];
+      const isCurrent = state.currentCell && state.currentCell.row === row && state.currentCell.col === col;
+
+      if (col === cols - 1 && boundary.last_col_visible_ratio < 1) {
+        const visibleW = rect.w * boundary.last_col_visible_ratio;
+        drawClippedZone(ctx, rect.x + visibleW, rect.y, rect.w - visibleW, rect.h);
+      }
+      if (row === rows - 1 && boundary.last_row_visible_ratio < 1) {
+        const visibleH = rect.h * boundary.last_row_visible_ratio;
+        drawClippedZone(ctx, rect.x, rect.y + visibleH, rect.w, rect.h - visibleH);
+      }
+
+      ctx.strokeStyle = isCurrent ? "#1769aa" : cellDefects.length ? "rgba(196, 60, 60, 0.85)" : "rgba(71, 84, 103, 0.62)";
+      ctx.lineWidth = isCurrent ? 3 : 1;
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+
+      ctx.fillStyle = "rgba(255, 255, 255, 0.86)";
+      ctx.fillRect(rect.x + 6, rect.y + 6, Math.max(38, Math.min(62, rect.w * 0.34)), 18);
+      ctx.fillStyle = "#17202a";
+      ctx.font = `${Math.max(10, Math.min(13, rect.w * 0.12))}px Segoe UI, sans-serif`;
+      ctx.fillText(`${row},${col}`, rect.x + 10, rect.y + 20);
+    }
+  }
+
+  if (mosaicImage) {
+    drawMosaicDetections(ctx, metrics, mosaicImage);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.fillRect(ox + 10, oy + 10, 138, 22);
+    ctx.fillStyle = "#17202a";
+    ctx.font = "13px Microsoft YaHei, Segoe UI, sans-serif";
+    ctx.fillText("整板拼接复核图", ox + 18, oy + 26);
+  }
 }
 
 function drawCanvas() {
@@ -729,7 +1264,7 @@ function drawCanvas() {
   if (!state.plan) {
     ctx.fillStyle = "#667085";
     ctx.font = "24px Microsoft YaHei, Segoe UI, sans-serif";
-    ctx.fillText(state.mode === "handheld" ? "手持模式无坐标定位" : state.mode === "video" ? "等待滑台行程状态" : "等待 PCB 长宽参数", 36, 58);
+    ctx.fillText(state.mode === "handheld" ? "手持模式无坐标定位" : state.mode === "phone" ? "等待手机上传照片" : state.mode === "video" ? "等待滑台行程状态" : "等待 PCB 长宽参数", 36, 58);
     return;
   }
 
@@ -738,63 +1273,56 @@ function drawCanvas() {
     return;
   }
 
+  if (state.plan.scan_type === "phone") {
+    drawPhoneCanvas(ctx, width, height);
+    return;
+  }
+
   if (state.plan.scan_type === "continuous_video") {
     drawVideoCanvas(ctx, width, height);
     return;
   }
 
-  const pad = 34;
-  const cols = state.plan.cols;
-  const rows = state.plan.rows;
-  const tile = Math.min((width - pad * 2) / cols, (height - pad * 2) / rows);
-  const gridW = tile * cols;
-  const gridH = tile * rows;
-  const ox = (width - gridW) / 2;
-  const oy = pad;
-  const boundary = state.plan.logical_boundary;
+  drawSteppedCanvas(ctx, width, height);
+}
 
-  ctx.fillStyle = "#e8f3ef";
-  ctx.fillRect(ox, oy, gridW, gridH);
+function drawPhoneCanvas(ctx, width, height) {
+  const pad = 42;
+  const item = currentPhoneUpload();
+  const sourcePath = item ? item.raw_image : "";
+  const image = sourcePath ? cachedArtifactImage(sourcePath) : null;
+  const defects = state.results.get("phone") || (item && item.defects ? decorateDefects(item.defects || [], item) : []);
+  const naturalW = image && image.naturalWidth ? image.naturalWidth : Math.max(1, state.plan.image_width || 16);
+  const naturalH = image && image.naturalHeight ? image.naturalHeight : Math.max(1, state.plan.image_height || 10);
+  const scale = Math.min((width - pad * 2) / naturalW, (height - pad * 2) / naturalH);
+  const boardW = naturalW * scale;
+  const boardH = naturalH * scale;
+  const ox = (width - boardW) / 2;
+  const oy = (height - boardH) / 2;
 
-  for (let row = 0; row < rows; row += 1) {
-    for (let col = 0; col < cols; col += 1) {
-      const x = ox + col * tile;
-      const y = oy + row * tile;
-      const key = `${row}:${col}`;
-      const cellDefects = state.results.get(key);
-      const hasDefect = cellDefects && cellDefects.length > 0;
-      const hasImage = state.cellArtifacts.has(key);
-      const isCurrent = state.currentCell && state.currentCell.row === row && state.currentCell.col === col;
-
-      ctx.fillStyle = hasDefect
-        ? "rgba(209, 67, 67, 0.18)"
-        : hasImage
-          ? "rgba(33, 128, 87, 0.16)"
-          : "rgba(33, 128, 87, 0.08)";
-      ctx.fillRect(x + 1, y + 1, tile - 2, tile - 2);
-
-      if (col === cols - 1 && boundary.last_col_visible_ratio < 1) {
-        const visibleW = tile * boundary.last_col_visible_ratio;
-        drawClippedZone(ctx, x + visibleW, y, tile - visibleW, tile);
-      }
-      if (row === rows - 1 && boundary.last_row_visible_ratio < 1) {
-        const visibleH = tile * boundary.last_row_visible_ratio;
-        drawClippedZone(ctx, x, y + visibleH, tile, tile - visibleH);
-      }
-
-      ctx.strokeStyle = isCurrent ? "#1769aa" : "#93a4b7";
-      ctx.lineWidth = isCurrent ? 3 : 1;
-      ctx.strokeRect(x + 0.5, y + 0.5, tile - 1, tile - 1);
-
-      ctx.fillStyle = "#475467";
-      ctx.font = `${Math.max(10, Math.min(14, tile * 0.16))}px Segoe UI, sans-serif`;
-      ctx.fillText(`${row},${col}`, x + 8, y + 18);
-    }
-  }
-
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(ox, oy, boardW, boardH);
   ctx.strokeStyle = "#1769aa";
   ctx.lineWidth = 2;
-  ctx.strokeRect(ox, oy, gridW, gridH);
+  ctx.strokeRect(ox, oy, boardW, boardH);
+
+  if (image) {
+    ctx.drawImage(image, ox, oy, boardW, boardH);
+    drawDetectionOverlay(ctx, defects, { x: ox, y: oy, w: boardW, h: boardH }, image, "#b42318");
+  } else {
+    ctx.fillStyle = "#667085";
+    ctx.font = "22px Microsoft YaHei, Segoe UI, sans-serif";
+    ctx.fillText("等待手机上传或选择照片", ox + 28, oy + 58);
+    ctx.font = "14px Microsoft YaHei, Segoe UI, sans-serif";
+    ctx.fillText("手机访问 /phone 上传后，电脑端选择照片并开始整图检测。", ox + 28, oy + 92);
+  }
+
+  ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+  ctx.fillRect(ox + 10, oy + 10, Math.max(80, Math.min(260, boardW - 20)), 28);
+  ctx.fillStyle = "#17202a";
+  ctx.font = "13px Microsoft YaHei, Segoe UI, sans-serif";
+  const label = item ? `手机照片 · ${item.name || item.upload_id}` : "手机拍照模式";
+  ctx.fillText(label.slice(0, 32), ox + 20, oy + 29);
 }
 
 function drawHandheldCanvas(ctx, width, height) {
@@ -992,19 +1520,25 @@ function renderDefects(defects, row, col) {
 
 function rememberCellArtifact(payload) {
   if (payload.row === undefined || payload.col === undefined) return;
+  const key = cellKey(payload.row, payload.col);
+  const existing = state.cellArtifacts.get(key) || {};
+  const next = Object.assign({}, existing, {
+    row: payload.row,
+    col: payload.col,
+  });
+  for (const field of ["raw_image", "annotated_image", "result_json", "latest_image", "source_image", "simulation_crop"]) {
+    if (payload[field]) next[field] = payload[field];
+  }
+  for (const field of ["capture_ms", "inference_ms", "status"]) {
+    if (payload[field] !== undefined) next[field] = payload[field];
+  }
+  if (payload.defects) next.defects = payload.defects;
   state.cellArtifacts.set(
-    cellKey(payload.row, payload.col),
-    {
-      row: payload.row,
-      col: payload.col,
-      raw_image: payload.raw_image,
-      annotated_image: payload.annotated_image,
-      result_json: payload.result_json,
-      defects: payload.defects || [],
-      capture_ms: payload.capture_ms,
-      inference_ms: payload.inference_ms,
-    },
+    key,
+    next,
   );
+  if (next.raw_image) cachedArtifactImage(next.raw_image);
+  if (next.annotated_image) cachedArtifactImage(next.annotated_image);
 }
 
 function showPreviewImage(row, col, imagePath, sourceText, setOverride = true) {
@@ -1047,6 +1581,8 @@ function resetScanUi() {
   state.currentCell = null;
   state.videoPosition = null;
   state.videoTrail = [];
+  state.mosaic = null;
+  state.phoneResult = null;
   state.results.clear();
   state.cellArtifacts.clear();
   state.previewOverride = null;
@@ -1067,8 +1603,10 @@ function handlePacket(packet) {
       break;
     case "grid_plan":
       state.plan = payload;
+      state.mosaic = null;
       state.results.clear();
       state.cellArtifacts.clear();
+      state.imageCache.clear();
       updatePlanUi();
       drawCanvas();
       logEvent(`grid_plan rows=${payload.rows} cols=${payload.cols}`);
@@ -1083,6 +1621,11 @@ function handlePacket(packet) {
         state.currentCell = { row: payload.row, col: payload.col };
         drawCanvas();
       }
+      if (payload.phase === "capture_frame" && payload.raw_image && payload.row !== undefined) {
+        rememberCellArtifact(payload);
+        drawCanvas();
+        showPreviewImage(payload.row, payload.col, payload.raw_image, "当前拍摄原图");
+      }
       if (payload.phase === "detect_inference" && payload.raw_image && payload.row !== undefined) {
         showPreviewImage(payload.row, payload.col, payload.raw_image, "当前原图");
       }
@@ -1096,6 +1639,26 @@ function handlePacket(packet) {
       drawCanvas();
       showCellArtifact(payload.row, payload.col);
       logEvent(`result row=${payload.row} col=${payload.col} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
+      break;
+    case "mosaic_result":
+      state.mosaic = payload;
+      if (payload.mosaic_raw) cachedArtifactImage(payload.mosaic_raw);
+      if (payload.mosaic_annotated) cachedArtifactImage(payload.mosaic_annotated);
+      if (payload.defects && payload.defects.length) {
+        state.results.set("mosaic", decorateDefects(payload.defects, {
+          raw_image: payload.mosaic_raw,
+          annotated_image: payload.mosaic_annotated,
+          inference_ms: payload.inference_ms,
+        }));
+      }
+      renderDefects([], 0, 0);
+      drawCanvas();
+      showPreviewImage("整板", "复核", payload.mosaic_annotated || payload.mosaic_raw, "整板拼接复核图");
+      logEvent(`mosaic_result cells=${payload.cell_count || 0} defects=${(payload.defects || []).length} stitch=${payload.stitch_ms ? Math.round(payload.stitch_ms) : "-"}ms`);
+      break;
+    case "mosaic_error":
+      setCommandHint(payload.message || payload.error || "整板拼接失败", "warn");
+      logEvent(`MOSAIC ERROR: ${payload.message || payload.error || "mosaic_error"}`);
       break;
     case "scan_error":
       if (!payload.request_id || payload.error) {
@@ -1112,6 +1675,12 @@ function handlePacket(packet) {
       state.backendRunning = false;
       setScanButtons(false);
       updateProgress(payload.progress);
+      if (payload.mosaic && !state.mosaic) {
+        state.mosaic = payload.mosaic;
+        if (state.mosaic.mosaic_raw) cachedArtifactImage(state.mosaic.mosaic_raw);
+        if (state.mosaic.mosaic_annotated) cachedArtifactImage(state.mosaic.mosaic_annotated);
+        drawCanvas();
+      }
       el.phaseValue.textContent = "Complete";
       setCommandHint("检测完成", "good");
       logEvent(`scan_complete · return_origin=${payload.return_motion || "done"}`);
@@ -1129,6 +1698,7 @@ function handlePacket(packet) {
       state.plan = payload;
       state.results.clear();
       state.cellArtifacts.clear();
+      state.mosaic = null;
       state.videoTrail = [];
       updatePlanUi();
       drawCanvas();
@@ -1208,6 +1778,49 @@ function handlePacket(packet) {
       setCommandHint("手持检测已停止", "neutral");
       logEvent(payload.message || "handheld_stopped");
       break;
+    case "phone_upload_selected":
+      mergePhoneUpload(payload);
+      state.selectedPhoneUploadId = payload.upload_id || state.selectedPhoneUploadId;
+      state.plan = buildPhonePlan(currentPhoneUpload());
+      updatePlanUi();
+      updatePreviewSource();
+      drawCanvas();
+      logEvent(`phone_upload_selected ${payload.upload_id || ""}`);
+      break;
+    case "phone_detecting":
+      el.phaseValue.textContent = "Phone Detecting";
+      el.debounceValue.textContent = "Whole image";
+      setCommandHint(payload.message || "手机照片整图 YOLO 推理中", "good");
+      el.progressBar.style.width = "45%";
+      logEvent(`phone_detecting ${payload.upload_id || ""}`);
+      break;
+    case "phone_result":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      mergePhoneUpload(payload);
+      state.selectedPhoneUploadId = payload.upload_id || state.selectedPhoneUploadId;
+      state.phoneResult = payload;
+      state.plan = buildPhonePlan(Object.assign({}, currentPhoneUpload() || {}, payload));
+      state.results.set("phone", decorateDefects(payload.defects || [], payload));
+      updatePlanUi();
+      renderDefects([], 0, 0);
+      el.progressBar.style.width = "100%";
+      el.phaseValue.textContent = "Phone Complete";
+      setCommandHint("手机照片检测完成", "good");
+      showPreviewImage("手机", "整图", payload.annotated_image || payload.raw_image, "手机整图检测结果");
+      drawCanvas();
+      refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
+      logEvent(`phone_result defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
+      break;
+    case "phone_error":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      el.phaseValue.textContent = "Phone Error";
+      setCommandHint(payload.message || payload.error || "手机照片检测失败", "bad");
+      logEvent(`PHONE ERROR: ${payload.message || payload.error || "phone_error"}`);
+      break;
     default:
       logEvent(`packet ${packet.type}`);
   }
@@ -1255,8 +1868,9 @@ function setScanButtons(scanning) {
   const busy = scanning || state.backendRunning;
   const videoMode = state.mode === "video";
   const handheldMode = state.mode === "handheld";
-  const idleText = handheldMode ? "开始手持检测" : videoMode ? "开始视频检测" : "开始检测";
-  const busyText = handheldMode ? "手持检测中" : videoMode ? "视频检测中" : "检测中";
+  const phoneMode = state.mode === "phone";
+  const idleText = handheldMode ? "开始手持检测" : phoneMode ? "开始整图检测" : videoMode ? "开始视频检测" : "开始检测";
+  const busyText = handheldMode ? "手持检测中" : phoneMode ? "整图检测中" : videoMode ? "视频检测中" : "检测中";
   el.startBtn.disabled = busy;
   el.startBtn.textContent = busy ? busyText : idleText;
   el.stopBtn.classList.toggle("armed", busy);
@@ -1288,6 +1902,9 @@ function modePreflight(status) {
   if (state.mode === "simulation" && !state.simulationImagePath) {
     return { ok: false, message: "请先导入一张 PCB 图片" };
   }
+  if (state.mode === "phone" && !state.selectedPhoneUploadId) {
+    return { ok: false, message: "请先选择一张手机上传照片" };
+  }
   if (state.mode === "video") {
     const axes = motor.axes || {};
     const homed = Boolean(axes.x && axes.x.homed && axes.y && axes.y.homed && axes.z && axes.z.homed);
@@ -1315,8 +1932,11 @@ async function startScan() {
   setCommandHint("启动指令已发送，等待后端确认", "good");
   state.results.clear();
   state.cellArtifacts.clear();
+  state.mosaic = null;
+  state.imageCache.clear();
   state.videoTrail = [];
   state.videoPosition = null;
+  state.phoneResult = null;
   el.defectList.innerHTML = "";
   el.progressBar.style.width = "0%";
 
@@ -1328,6 +1948,22 @@ async function startScan() {
     const sent = send("start_handheld_detection", {
       inference_fps: Number(el.videoInferenceFps.value || 5),
       preview_fps: 12,
+    });
+    if (!sent) {
+      state.backendRunning = false;
+      setScanButtons(false);
+    }
+    return;
+  }
+
+  if (state.mode === "phone") {
+    const item = currentPhoneUpload();
+    state.plan = buildPhonePlan(item);
+    updatePlanUi();
+    drawCanvas();
+    updatePreviewSource();
+    const sent = send("start_phone_detection", {
+      upload_id: state.selectedPhoneUploadId,
     });
     if (!sent) {
       state.backendRunning = false;
@@ -1375,6 +2011,15 @@ function selectCellFromCanvas(event) {
     logEvent("手持模式画板无 XY/FOV 坐标定位");
     return;
   }
+  if (state.plan.scan_type === "phone") {
+    const item = currentPhoneUpload();
+    el.xyReadout.textContent = "无滑台";
+    if (item) {
+      showPreviewImage("手机", "整图", item.annotated_image || item.raw_image, "手机整图预览");
+    }
+    setCommandHint("手机拍照模式显示整张照片的检测结果", "neutral");
+    return;
+  }
   if (state.plan.scan_type === "continuous_video") {
     const rect = el.canvas.getBoundingClientRect();
     const ratioX = el.canvas.width / rect.width;
@@ -1394,23 +2039,29 @@ function selectCellFromCanvas(event) {
   const ratioY = el.canvas.height / rect.height;
   const px = (event.clientX - rect.left) * ratioX;
   const py = (event.clientY - rect.top) * ratioY;
-  const pad = 34;
   const cols = state.plan.cols;
   const rows = state.plan.rows;
-  const tile = Math.min((el.canvas.width - pad * 2) / cols, (el.canvas.height - pad * 2) / rows);
-  const gridW = tile * cols;
-  const gridH = tile * rows;
-  const ox = (el.canvas.width - gridW) / 2;
-  const oy = pad;
-  if (px < ox || py < oy || px > ox + gridW || py > oy + gridH) return;
-  const col = Math.min(cols - 1, Math.max(0, Math.floor((px - ox) / tile)));
-  const row = Math.min(rows - 1, Math.max(0, Math.floor((py - oy) / tile)));
+  const metrics = steppedCanvasMetrics(el.canvas.width, el.canvas.height);
+  if (px < metrics.ox || py < metrics.oy || px > metrics.ox + metrics.boardW || py > metrics.oy + metrics.boardH) return;
+  let selected = null;
+  for (let rowIndex = rows - 1; rowIndex >= 0; rowIndex -= 1) {
+    for (let colIndex = cols - 1; colIndex >= 0; colIndex -= 1) {
+      const cellRect = steppedCellRect(metrics, rowIndex, colIndex);
+      if (px >= cellRect.x && py >= cellRect.y && px <= cellRect.x + cellRect.w && py <= cellRect.y + cellRect.h) {
+        selected = { row: rowIndex, col: colIndex, rect: cellRect };
+        break;
+      }
+    }
+    if (selected) break;
+  }
+  if (!selected) return;
+  const { row, col } = selected;
   state.currentCell = { row, col };
-  const x = state.plan.origin_mm.x + col * state.plan.fov_mm.width;
-  const y = state.plan.origin_mm.y + row * state.plan.fov_mm.height;
+  const x = selected.rect.x_mm;
+  const y = selected.rect.y_mm;
   el.xyReadout.textContent = `${x.toFixed(1)}, ${y.toFixed(1)}`;
   showCellArtifact(row, col);
-  logEvent(`选中网格 row=${row} col=${col}`);
+  logEvent(`选中区域 row=${row} col=${col} X=${x.toFixed(1)} Y=${y.toFixed(1)}`);
   drawCanvas();
 }
 
@@ -1462,10 +2113,35 @@ el.pingBtn.addEventListener("click", () => send("ping"));
 el.stopBtn.addEventListener("click", () => send("stop_scan"));
 el.refreshStatusBtn.addEventListener("click", () => refreshSystemStatus({ log: true }));
 el.reloadCameraBtn.addEventListener("click", () => {
+  if (state.mode === "phone") {
+    refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
+  }
   updatePreviewSource();
   refreshSystemStatus({ log: true });
 });
 el.uploadSimulationBtn.addEventListener("click", uploadSimulationImages);
+if (el.uploadPhoneBtn) {
+  el.uploadPhoneBtn.addEventListener("click", uploadPhoneImages);
+}
+if (el.refreshPhoneUploadsBtn) {
+  el.refreshPhoneUploadsBtn.addEventListener("click", () => refreshPhoneUploads({ preserveSelection: true, selectLatest: false }));
+}
+if (el.deletePhoneUploadBtn) {
+  el.deletePhoneUploadBtn.addEventListener("click", deleteSelectedPhoneUpload);
+}
+if (el.phoneUploadSelect) {
+  el.phoneUploadSelect.addEventListener("change", () => {
+    setPhoneUpload(el.phoneUploadSelect.value);
+  });
+}
+if (el.phoneImageFile) {
+  el.phoneImageFile.addEventListener("change", () => {
+    const files = Array.from(el.phoneImageFile.files || []);
+    el.phoneUploadStatus.textContent = files.length
+      ? `已选择 ${files.length} 张手机照片`
+      : "等待手机拍照上传";
+  });
+}
 el.simulationImageFile.addEventListener("change", () => {
   const files = Array.from(el.simulationImageFile.files || []);
   el.simulationUploadStatus.textContent = files.length
@@ -1498,6 +2174,9 @@ el.cameraPreview.addEventListener("load", () => {
   if (state.mode === "simulation") {
     const item = currentSimulationImage();
     el.cameraPreviewStatus.textContent = item ? `模拟图已加载：${item.name || item.path}` : "等待导入 PCB 图片";
+  } else if (state.mode === "phone") {
+    const item = currentPhoneUpload();
+    el.cameraPreviewStatus.textContent = item ? `手机照片已加载：${item.name || item.upload_id}` : "等待手机上传照片";
   } else if (state.mode === "video" || state.mode === "handheld") {
     el.cameraPreviewStatus.textContent = state.mode === "handheld" ? "手持检测流已连接" : "视频检测流已连接";
   } else {
@@ -1507,6 +2186,8 @@ el.cameraPreview.addEventListener("load", () => {
 el.cameraPreview.addEventListener("error", () => {
   el.cameraPreviewStatus.textContent = state.mode === "simulation"
     ? "模拟图加载失败"
+    : state.mode === "phone"
+      ? "手机照片加载失败"
     : state.mode === "video" || state.mode === "handheld"
       ? "实时检测流等待启动或连接失败"
       : "相机流连接失败";

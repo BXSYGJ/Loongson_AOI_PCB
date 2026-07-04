@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>手机拍照上传 · Loongson AOI</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --line: #d9e2ec;
+      --text: #17202a;
+      --muted: #667085;
+      --blue: #1769aa;
+      --green: #218057;
+      --red: #b42318;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    }
+
+    main {
+      width: min(720px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    header {
+      margin: 8px 0 18px;
+    }
+
+    .brand {
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin: 8px 0 8px;
+      font-size: clamp(24px, 8vw, 34px);
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 12px 28px rgba(23, 32, 42, 0.06);
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      margin: 16px 0;
+      color: #344054;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    input[type="file"] {
+      width: 100%;
+      padding: 14px;
+      border: 1px dashed #9fb3c8;
+      border-radius: 8px;
+      background: #f8fafc;
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    button {
+      width: 100%;
+      min-height: 46px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--blue);
+      color: #ffffff;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+
+    .status {
+      margin-top: 12px;
+      min-height: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .status.ok {
+      color: var(--green);
+    }
+
+    .status.bad {
+      color: var(--red);
+    }
+
+    .picker-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 16px 0 10px;
+    }
+
+    .picker-btn.secondary {
+      border: 1px solid #b9c7d6;
+      background: #ffffff;
+      color: var(--blue);
+    }
+
+    .hidden-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .preview {
+      margin-top: 16px;
+      display: none;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #eef3f8;
+    }
+
+    .preview img {
+      display: block;
+      width: 100%;
+      max-height: 56vh;
+      object-fit: contain;
+      background: #ffffff;
+    }
+
+    .recent {
+      margin-top: 18px;
+    }
+
+    .recent h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    .upload-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .upload-list li {
+      display: grid;
+      gap: 2px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      font-size: 14px;
+    }
+
+    .upload-list span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .nav {
+      margin-top: 16px;
+      display: inline-flex;
+      color: var(--blue);
+      font-size: 14px;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand">Loongson AOI</div>
+      <h1>手机拍照上传</h1>
+      <p>拍照或选择 PCB 图片后上传到电脑/龙芯教育派。检测由电脑端第五模块人工选择后启动。</p>
+    </header>
+
+    <section class="panel">
+      <div class="picker-actions">
+        <button class="picker-btn" id="takePhotoBtn" type="button">拍照</button>
+        <button class="picker-btn secondary" id="chooseGalleryBtn" type="button">从图库选择</button>
+      </div>
+      <input id="cameraInput" class="hidden-input" type="file" accept="image/*" capture="environment" />
+      <input id="galleryInput" class="hidden-input" type="file" accept="image/*" />
+      <button id="uploadBtn" type="button">上传照片</button>
+      <div id="status" class="status">等待拍照或选择图片</div>
+      <div id="preview" class="preview">
+        <img id="previewImage" alt="已选择照片预览" />
+      </div>
+    </section>
+
+    <section class="recent">
+      <h2>最近上传</h2>
+      <ul id="uploadList" class="upload-list">
+        <li>正在读取上传列表...</li>
+      </ul>
+    </section>
+
+    <a class="nav" href="/">返回完整 AOI 网站</a>
+  </main>
+
+  <script>
+    const cameraInput = document.getElementById("cameraInput");
+    const galleryInput = document.getElementById("galleryInput");
+    const takePhotoBtn = document.getElementById("takePhotoBtn");
+    const chooseGalleryBtn = document.getElementById("chooseGalleryBtn");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const statusNode = document.getElementById("status");
+    const preview = document.getElementById("preview");
+    const previewImage = document.getElementById("previewImage");
+    const uploadList = document.getElementById("uploadList");
+    let selectedFile = null;
+
+    function setStatus(text, tone = "") {
+      statusNode.textContent = text;
+      statusNode.classList.remove("ok", "bad");
+      if (tone) statusNode.classList.add(tone);
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) return "-";
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    function artifactUrl(path) {
+      return `/api/artifact?path=${encodeURIComponent(path)}`;
+    }
+
+    function imageStem(filename) {
+      const dot = filename.lastIndexOf(".");
+      return dot > 0 ? filename.slice(0, dot) : filename || "phone-pcb";
+    }
+
+    function loadImageElement(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => {
+          URL.revokeObjectURL(url);
+          resolve(image);
+        };
+        image.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error("图片无法在浏览器端解码"));
+        };
+        image.src = url;
+      });
+    }
+
+    function canvasToBlob(canvas, type, quality) {
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => resolve(blob), type, quality);
+      });
+    }
+
+    function convertCanvasToGrayscale(ctx, width, height) {
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+      for (let index = 0; index < data.length; index += 4) {
+        const gray = Math.round(data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114);
+        data[index] = gray;
+        data[index + 1] = gray;
+        data[index + 2] = gray;
+      }
+      ctx.putImageData(imageData, 0, 0);
+    }
+
+    async function compressImageForUpload(file) {
+      const maxDimension = 1600;
+      const quality = 0.82;
+      if (!file.type || !file.type.startsWith("image/")) {
+        return { blob: file, filename: file.name, compressed: false, grayscale: false, originalSize: file.size, uploadSize: file.size };
+      }
+
+      const image = await loadImageElement(file);
+      const sourceWidth = image.naturalWidth || image.width;
+      const sourceHeight = image.naturalHeight || image.height;
+      const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      ctx.drawImage(image, 0, 0, width, height);
+      convertCanvasToGrayscale(ctx, width, height);
+      const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+      if (!blob) {
+        return { blob: file, filename: file.name, compressed: false, grayscale: false, originalSize: file.size, uploadSize: file.size };
+      }
+      return {
+        blob,
+        filename: `${imageStem(file.name)}.jpg`,
+        compressed: blob.size < file.size,
+        grayscale: true,
+        originalSize: file.size,
+        uploadSize: blob.size,
+      };
+    }
+
+    async function refreshUploads() {
+      try {
+        const response = await fetch("/api/phone/uploads");
+        if (!response.ok) throw new Error(`uploads ${response.status}`);
+        const payload = await response.json();
+        const uploads = Array.isArray(payload.uploads) ? payload.uploads : [];
+        uploadList.innerHTML = "";
+        if (!uploads.length) {
+          uploadList.innerHTML = "<li>暂无上传记录</li>";
+          return;
+        }
+        for (const item of uploads.slice(0, 8)) {
+          const li = document.createElement("li");
+          const time = item.uploaded_at ? new Date(item.uploaded_at).toLocaleString() : "";
+          li.innerHTML = `<strong>${item.name || item.upload_id}</strong><span>${formatBytes(item.size_bytes)} · ${item.status || "uploaded"} · ${time}</span>`;
+          uploadList.append(li);
+        }
+      } catch (error) {
+        uploadList.innerHTML = "<li>上传列表读取失败</li>";
+      }
+    }
+
+    function setSelectedFile(file, sourceLabel) {
+      if (!file) {
+        preview.style.display = "none";
+        selectedFile = null;
+        setStatus("等待拍照或选择图片");
+        return;
+      }
+      selectedFile = file;
+      previewImage.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+      setStatus(`${sourceLabel}：${file.name} · ${formatBytes(file.size)}`);
+    }
+
+    takePhotoBtn.addEventListener("click", () => {
+      cameraInput.click();
+    });
+
+    chooseGalleryBtn.addEventListener("click", () => {
+      galleryInput.click();
+    });
+
+    cameraInput.addEventListener("change", () => {
+      setSelectedFile(cameraInput.files && cameraInput.files[0], "已拍照");
+    });
+
+    galleryInput.addEventListener("change", () => {
+      setSelectedFile(galleryInput.files && galleryInput.files[0], "已从图库选择");
+    });
+
+    uploadBtn.addEventListener("click", async () => {
+      const file = selectedFile;
+      if (!file) {
+        setStatus("请先拍照或选择图片", "bad");
+        return;
+      }
+      uploadBtn.disabled = true;
+      setStatus("正在转灰度并压缩图片...");
+      try {
+        const prepared = await compressImageForUpload(file);
+        const saving = prepared.grayscale
+          ? `已转灰度 ${formatBytes(prepared.originalSize)} → ${formatBytes(prepared.uploadSize)}，正在上传...`
+          : "正在上传...";
+        setStatus(saving);
+        const response = await fetch(`/api/phone/upload?filename=${encodeURIComponent(prepared.filename)}`, {
+          method: "POST",
+          headers: { "Content-Type": prepared.blob.type || file.type || "application/octet-stream" },
+          body: prepared.blob,
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `upload ${response.status}`);
+        }
+        const result = await response.json();
+        setStatus(`上传成功：${result.name || result.upload_id}`, "ok");
+        if (result.raw_image) {
+          previewImage.src = artifactUrl(result.raw_image);
+          preview.style.display = "block";
+        }
+        cameraInput.value = "";
+        galleryInput.value = "";
+        selectedFile = null;
+        await refreshUploads();
+      } catch (error) {
+        setStatus(`上传失败：${error.message || error}`, "bad");
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    });
+
+    refreshUploads();
+  </script>
+</body>
+</html>

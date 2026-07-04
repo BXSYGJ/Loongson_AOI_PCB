@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -22,6 +23,18 @@ def _env_int(name: str, default: int) -> int:
     if value is None or value.strip() == "":
         return default
     return int(value, 0)
+
+
+def _env_int_list(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    items: list[int] = []
+    for part in re.split(r"[,; ]+", value.strip()):
+        if not part:
+            continue
+        items.append(int(part, 0))
+    return tuple(items) if items else default
 
 
 def _env_float(name: str, default: float) -> float:
@@ -64,6 +77,7 @@ DETECTION_OUTPUT_DIR = ALGORITHM_ROOT / "algorithm" / "outputs" / "detections"
 SCAN_OUTPUT_DIR = ALGORITHM_ROOT / "algorithm" / "outputs" / "scans"
 SIMULATION_OUTPUT_DIR = ALGORITHM_ROOT / "algorithm" / "outputs" / "simulation"
 SIMULATION_IMPORT_DIR = SIMULATION_OUTPUT_DIR / "imports"
+PHONE_UPLOAD_DIR = ALGORITHM_ROOT / "algorithm" / "outputs" / "mobile_uploads"
 RESULT_JSON = DETECTION_OUTPUT_DIR / "result.json"
 RESULT_IMAGE = DETECTION_OUTPUT_DIR / "result.jpg"
 DEFAULT_IMAGE = CAMERA_OUTPUT_DIR / "latest.jpg"
@@ -78,6 +92,14 @@ DEFAULT_WEIGHTS = Path(
 ).expanduser()
 
 SIMULATION_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+PHONE_MAX_UPLOAD_BYTES = _env_int("LOONGSON_AOI_PHONE_MAX_UPLOAD_MB", 20) * 1024 * 1024
+_PHONE_TILE_SIZE_ENV = os.getenv("LOONGSON_AOI_PHONE_TILE_SIZE")
+PHONE_TILE_SIZE = _env_int("LOONGSON_AOI_PHONE_TILE_SIZE", 640)
+PHONE_TILE_SIZES = _env_int_list(
+    "LOONGSON_AOI_PHONE_TILE_SIZES",
+    (PHONE_TILE_SIZE,) if _PHONE_TILE_SIZE_ENV else (640, 800),
+)
+PHONE_TILE_OVERLAP = _env_float("LOONGSON_AOI_PHONE_TILE_OVERLAP", 0.5)
 VIDEO_DEFAULT_INFERENCE_FPS = _env_float("LOONGSON_AOI_VIDEO_INFERENCE_FPS", 5.0)
 VIDEO_DEFAULT_PREVIEW_FPS = _env_float("LOONGSON_AOI_VIDEO_PREVIEW_FPS", 8.0)
 CAMERA_SOURCE_FILE = Path(os.getenv("LOONGSON_AOI_CAMERA_SOURCE_FILE", ROOT / "camera_source.txt")).expanduser()
@@ -347,7 +369,7 @@ class YoloDetector:
     def __init__(self) -> None:
         self.weights = DEFAULT_WEIGHTS
         self.config = DEFAULT_CONFIG
-        self.conf = _env_float("LOONGSON_AOI_YOLO_CONF", 0.25)
+        self.conf = _env_float("LOONGSON_AOI_YOLO_CONF", 0.5)
         self.imgsz = _env_int("LOONGSON_AOI_YOLO_IMGSZ", 960)
         self._lock = threading.RLock()
         self._model: Any = None
@@ -723,6 +745,468 @@ def _cell_dir(scan_id: str, row: int, col: int) -> Path:
     return SCAN_OUTPUT_DIR / scan_id / f"r{row:03d}_c{col:03d}"
 
 
+def _scan_dir(scan_id: str) -> Path:
+    return SCAN_OUTPUT_DIR / scan_id
+
+
+def scan_manifest_path(scan_id: str) -> Path:
+    return _scan_dir(scan_id) / "manifest.json"
+
+
+def write_scan_manifest(
+    scan_id: str,
+    plan: dict[str, Any],
+    operation_mode: str,
+    cells: list[dict[str, Any]],
+    status: str = "running",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    manifest = {
+        "scan_id": scan_id,
+        "status": status,
+        "operation_mode": operation_mode,
+        "updated_at": _now_iso(),
+        "plan": plan,
+        "cells": cells,
+    }
+    if extra:
+        manifest.update(extra)
+    path = scan_manifest_path(scan_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(manifest, file, ensure_ascii=False, indent=2)
+    return {"manifest": _rel(path), "cell_count": len(cells), "status": status}
+
+
+def _load_scan_manifest(scan_id: str) -> dict[str, Any]:
+    path = scan_manifest_path(scan_id)
+    if not path.exists():
+        raise CameraTriggerError(f"Scan manifest does not exist: {path}")
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _tile_starts(total: int, tile: int, stride: int) -> list[int]:
+    if total <= tile:
+        return [0]
+    starts = list(range(0, max(1, total - tile + 1), max(1, stride)))
+    final = total - tile
+    if starts[-1] != final:
+        starts.append(final)
+    return starts
+
+
+def _bbox_iou(a: list[int], b: list[int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union else 0.0
+
+
+def _nms_detections(detections: list[dict[str, Any]], iou_threshold: float = 0.45) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for detection in detections:
+        by_type.setdefault(str(detection.get("type", "")), []).append(detection)
+
+    for items in by_type.values():
+        ordered = sorted(items, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+        class_kept: list[dict[str, Any]] = []
+        for item in ordered:
+            bbox = item.get("bbox") or [0, 0, 0, 0]
+            if all(_bbox_iou(bbox, kept_item.get("bbox") or [0, 0, 0, 0]) < iou_threshold for kept_item in class_kept):
+                class_kept.append(item)
+        kept.extend(class_kept)
+    return sorted(kept, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+
+
+def _mosaic_geometry(manifest: dict[str, Any], tile_width: int, tile_height: int) -> dict[str, Any]:
+    plan = manifest.get("plan") or {}
+    fov = plan.get("fov_mm") or {"width": 30.0, "height": 30.0}
+    origin = plan.get("origin_mm") or {"x": 0.0, "y": 0.0}
+    covered = plan.get("covered_mm") or {}
+    cells = [cell for cell in manifest.get("cells", []) if cell.get("raw_image")]
+    if not cells:
+        raise CameraTriggerError("No captured raw images found in scan manifest.")
+
+    fov_width = float(fov.get("width", 30.0))
+    fov_height = float(fov.get("height", 30.0))
+    px_per_mm_x = tile_width / max(fov_width, 1e-6)
+    px_per_mm_y = tile_height / max(fov_height, 1e-6)
+    origin_x = float(origin.get("x", 0.0))
+    origin_y = float(origin.get("y", 0.0))
+    max_x_mm = max(float(cell.get("x_mm", 0.0)) - origin_x + fov_width for cell in cells)
+    max_y_mm = max(float(cell.get("y_mm", 0.0)) - origin_y + fov_height for cell in cells)
+    covered_x_mm = max(float(covered.get("length", 0.0) or 0.0), max_x_mm)
+    covered_y_mm = max(float(covered.get("width", 0.0) or 0.0), max_y_mm)
+
+    return {
+        "fov_mm": {"width": fov_width, "height": fov_height},
+        "origin_mm": {"x": origin_x, "y": origin_y},
+        "px_per_mm": {"x": px_per_mm_x, "y": px_per_mm_y},
+        "tile_px": {"width": tile_width, "height": tile_height},
+        "canvas_px": {
+            "width": max(1, int(round(covered_x_mm * px_per_mm_x))),
+            "height": max(1, int(round(covered_y_mm * px_per_mm_y))),
+        },
+        "covered_mm": {"length": covered_x_mm, "width": covered_y_mm},
+    }
+
+
+def _build_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    cells = [cell for cell in manifest.get("cells", []) if cell.get("raw_image")]
+    if not cells:
+        raise CameraTriggerError("No captured raw images found in scan manifest.")
+
+    first_image = cv2.imread(str(resolve_artifact(cells[0]["raw_image"])))
+    if first_image is None:
+        raise CameraTriggerError(f"Could not read first raw image: {cells[0]['raw_image']}")
+    tile_height, tile_width = first_image.shape[:2]
+    geometry = _mosaic_geometry(manifest, tile_width, tile_height)
+    canvas_width = int(geometry["canvas_px"]["width"])
+    canvas_height = int(geometry["canvas_px"]["height"])
+    px_per_mm_x = float(geometry["px_per_mm"]["x"])
+    px_per_mm_y = float(geometry["px_per_mm"]["y"])
+    origin = geometry["origin_mm"]
+
+    accum = np.zeros((canvas_height, canvas_width, 3), dtype=np.float32)
+    weights = np.zeros((canvas_height, canvas_width, 1), dtype=np.float32)
+    placed_cells: list[dict[str, Any]] = []
+
+    for cell in cells:
+        image = cv2.imread(str(resolve_artifact(cell["raw_image"])))
+        if image is None:
+            continue
+        if image.shape[1] != tile_width or image.shape[0] != tile_height:
+            image = cv2.resize(image, (tile_width, tile_height), interpolation=cv2.INTER_AREA)
+
+        x_px = int(round((float(cell.get("x_mm", 0.0)) - float(origin["x"])) * px_per_mm_x))
+        y_px = int(round((float(cell.get("y_mm", 0.0)) - float(origin["y"])) * px_per_mm_y))
+        dst_x1 = max(0, x_px)
+        dst_y1 = max(0, y_px)
+        dst_x2 = min(canvas_width, x_px + tile_width)
+        dst_y2 = min(canvas_height, y_px + tile_height)
+        if dst_x2 <= dst_x1 or dst_y2 <= dst_y1:
+            continue
+        src_x1 = dst_x1 - x_px
+        src_y1 = dst_y1 - y_px
+        src_x2 = src_x1 + (dst_x2 - dst_x1)
+        src_y2 = src_y1 + (dst_y2 - dst_y1)
+        accum[dst_y1:dst_y2, dst_x1:dst_x2] += image[src_y1:src_y2, src_x1:src_x2].astype(np.float32)
+        weights[dst_y1:dst_y2, dst_x1:dst_x2] += 1.0
+        placed_cells.append(
+            {
+                "row": cell.get("row"),
+                "col": cell.get("col"),
+                "x_px": dst_x1,
+                "y_px": dst_y1,
+                "width_px": dst_x2 - dst_x1,
+                "height_px": dst_y2 - dst_y1,
+                "raw_image": cell.get("raw_image"),
+                "annotated_image": cell.get("annotated_image"),
+            }
+        )
+
+    safe_weights = np.maximum(weights, 1.0)
+    mosaic = np.clip(accum / safe_weights, 0, 255).astype(np.uint8)
+    return mosaic, geometry, placed_cells
+
+
+def _is_pixel_restore_manifest(manifest: dict[str, Any]) -> bool:
+    if manifest.get("operation_mode") != "simulation":
+        return False
+    cells = [cell for cell in manifest.get("cells", []) if cell.get("raw_image")]
+    return bool(cells) and all(
+        (cell.get("simulation_crop") or {}).get("pixel_geometry") == "source_restore"
+        for cell in cells
+    )
+
+
+def _build_pixel_restored_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    cells = [cell for cell in manifest.get("cells", []) if cell.get("raw_image")]
+    if not cells:
+        raise CameraTriggerError("No captured raw images found in scan manifest.")
+
+    first_crop = cells[0].get("simulation_crop") or {}
+    canvas_width = int(first_crop.get("source_width") or 0)
+    canvas_height = int(first_crop.get("source_height") or 0)
+    if canvas_width <= 0 or canvas_height <= 0:
+        raise CameraTriggerError("Simulation manifest does not contain source image dimensions.")
+
+    accum = np.zeros((canvas_height, canvas_width, 3), dtype=np.float32)
+    weights = np.zeros((canvas_height, canvas_width, 1), dtype=np.float32)
+    placed_cells: list[dict[str, Any]] = []
+
+    for cell in cells:
+        crop_meta = cell.get("simulation_crop") or {}
+        if crop_meta.get("pixel_geometry") != "source_restore":
+            raise CameraTriggerError("Simulation cell is missing source pixel crop metadata.")
+
+        image = cv2.imread(str(resolve_artifact(cell["raw_image"])))
+        if image is None:
+            continue
+
+        x1 = int(crop_meta["x1"])
+        y1 = int(crop_meta["y1"])
+        x2 = int(crop_meta["x2"])
+        y2 = int(crop_meta["y2"])
+        if x1 < 0 or y1 < 0 or x2 > canvas_width or y2 > canvas_height or x2 <= x1 or y2 <= y1:
+            raise CameraTriggerError(f"Invalid simulation crop rectangle for row={cell.get('row')}, col={cell.get('col')}.")
+
+        expected_width = x2 - x1
+        expected_height = y2 - y1
+        if image.shape[1] != expected_width or image.shape[0] != expected_height:
+            raise CameraTriggerError(
+                "Simulation crop dimensions do not match source pixel rectangle; refusing to resize during pixel restore."
+            )
+
+        accum[y1:y2, x1:x2] += image.astype(np.float32)
+        weights[y1:y2, x1:x2] += 1.0
+        placed_cells.append(
+            {
+                "row": cell.get("row"),
+                "col": cell.get("col"),
+                "x_px": x1,
+                "y_px": y1,
+                "width_px": expected_width,
+                "height_px": expected_height,
+                "raw_image": cell.get("raw_image"),
+                "annotated_image": cell.get("annotated_image"),
+                "simulation_crop": crop_meta,
+            }
+        )
+
+    if not placed_cells:
+        raise CameraTriggerError("No simulation crops could be placed into the mosaic.")
+    if np.any(weights == 0):
+        raise CameraTriggerError("Simulation pixel crops do not cover the full source image.")
+
+    mosaic = np.clip(accum / weights, 0, 255).astype(np.uint8)
+    plan = manifest.get("plan") or {}
+    geometry = {
+        "mode": "pixel_restore",
+        "source_px": {"width": canvas_width, "height": canvas_height},
+        "canvas_px": {"width": canvas_width, "height": canvas_height},
+        "fov_mm": plan.get("fov_mm"),
+        "step_mm": plan.get("step_mm"),
+        "covered_mm": plan.get("covered_mm"),
+        "note": "Simulation mosaic restores crops to their original source pixel rectangles.",
+    }
+    return mosaic, geometry, placed_cells
+
+
+def _detect_mosaic_tiles(mosaic: Any, geometry: dict[str, Any], tile_stride_ratio: float = 0.8) -> tuple[list[dict[str, Any]], float]:
+    start = time.perf_counter()
+    tile_width = int(geometry["tile_px"]["width"])
+    tile_height = int(geometry["tile_px"]["height"])
+    height, width = mosaic.shape[:2]
+    stride_x = max(1, int(tile_width * tile_stride_ratio))
+    stride_y = max(1, int(tile_height * tile_stride_ratio))
+    px_per_mm_x = float(geometry["px_per_mm"]["x"])
+    px_per_mm_y = float(geometry["px_per_mm"]["y"])
+    origin_x = float(geometry["origin_mm"]["x"])
+    origin_y = float(geometry["origin_mm"]["y"])
+
+    detections: list[dict[str, Any]] = []
+    for y in _tile_starts(height, tile_height, stride_y):
+        for x in _tile_starts(width, tile_width, stride_x):
+            tile = mosaic[y : min(height, y + tile_height), x : min(width, x + tile_width)]
+            if tile.size == 0:
+                continue
+            tile_detections, _, _ = yolo_detector.detect_frame(tile)
+            for detection in tile_detections:
+                x1, y1, x2, y2 = [int(value) for value in detection["bbox"]]
+                global_bbox = [x + x1, y + y1, x + x2, y + y2]
+                mapped = dict(detection)
+                mapped["bbox"] = global_bbox
+                mapped["bbox_mm"] = [
+                    round(origin_x + global_bbox[0] / px_per_mm_x, 4),
+                    round(origin_y + global_bbox[1] / px_per_mm_y, 4),
+                    round(origin_x + global_bbox[2] / px_per_mm_x, 4),
+                    round(origin_y + global_bbox[3] / px_per_mm_y, 4),
+                ]
+                mapped["source_tile"] = {"x": x, "y": y, "width": int(tile.shape[1]), "height": int(tile.shape[0])}
+                detections.append(mapped)
+
+    return _nms_detections(detections), (time.perf_counter() - start) * 1000.0
+
+
+def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any]:
+    start = time.perf_counter()
+    manifest = _load_scan_manifest(scan_id)
+    pixel_restore = _is_pixel_restore_manifest(manifest)
+    if pixel_restore:
+        mosaic, geometry, placed_cells = _build_pixel_restored_mosaic_image(manifest)
+    else:
+        mosaic, geometry, placed_cells = _build_mosaic_image(manifest)
+    cv2 = _import_cv2()
+
+    mosaic_dir = _scan_dir(scan_id) / "mosaic"
+    mosaic_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = mosaic_dir / ("mosaic_raw.png" if pixel_restore else "mosaic_raw.jpg")
+    annotated_path = mosaic_dir / "mosaic_annotated.jpg"
+    result_json_path = mosaic_dir / "mosaic_result.json"
+    mosaic_manifest_path = mosaic_dir / "mosaic_manifest.json"
+
+    detections: list[dict[str, Any]] = []
+    inference_ms = 0.0
+    annotated = mosaic.copy()
+    if run_detection:
+        if pixel_restore:
+            detections, annotated, inference_ms = yolo_detector.detect_frame(mosaic)
+        else:
+            detections, inference_ms = _detect_mosaic_tiles(mosaic, geometry)
+            for detection in detections:
+                draw_detection(annotated, detection["bbox"], str(detection.get("label") or detection.get("type")), float(detection.get("confidence", 0.0)))
+
+    cv2.imwrite(str(raw_path), mosaic)
+    cv2.imwrite(str(annotated_path), annotated)
+    with result_json_path.open("w", encoding="utf-8") as file:
+        json.dump(detections, file, ensure_ascii=False, indent=2)
+    with mosaic_manifest_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "scan_id": scan_id,
+                "created_at": _now_iso(),
+                "geometry": geometry,
+                "cells": placed_cells,
+                "mosaic_raw": _rel(raw_path),
+                "mosaic_annotated": _rel(annotated_path),
+                "mosaic_result_json": _rel(result_json_path),
+            },
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    return {
+        "ok": True,
+        "scan_id": scan_id,
+        "mosaic_raw": _rel(raw_path),
+        "mosaic_annotated": _rel(annotated_path),
+        "mosaic_result_json": _rel(result_json_path),
+        "mosaic_manifest": _rel(mosaic_manifest_path),
+        "defects": detections,
+        "cell_count": len(placed_cells),
+        "stitch_ms": round((time.perf_counter() - start) * 1000.0, 2),
+        "inference_ms": round(inference_ms, 2),
+        "geometry": geometry,
+    }
+
+
+def detect_tiled_image(
+    image_path: Path,
+    annotated_path: Path,
+    json_path: Path,
+    tile_size: int | list[int] | tuple[int, ...] = PHONE_TILE_SIZES,
+    overlap: float = PHONE_TILE_OVERLAP,
+    compatible_result_image: Path = RESULT_IMAGE,
+    compatible_result_json: Path = RESULT_JSON,
+) -> tuple[list[dict[str, Any]], float, dict[str, Any]]:
+    start = time.perf_counter()
+    cv2 = _import_cv2()
+    image = cv2.imread(str(image_path))
+    if image is None:
+        raise CameraTriggerError(f"Could not read image for tiled detection: {image_path}")
+
+    height, width = image.shape[:2]
+    overlap = max(0.0, min(0.9, float(overlap)))
+    if isinstance(tile_size, (list, tuple, set)):
+        requested_tile_sizes = [int(value) for value in tile_size]
+    else:
+        requested_tile_sizes = [int(tile_size)]
+    tile_sizes: list[int] = []
+    for requested in requested_tile_sizes:
+        normalized = max(32, requested)
+        if normalized not in tile_sizes:
+            tile_sizes.append(normalized)
+
+    raw_detections: list[dict[str, Any]] = []
+    tile_count = 0
+    tile_strides: dict[int, int] = {}
+    for current_tile_size in tile_sizes:
+        stride = max(1, int(round(current_tile_size * (1.0 - overlap))))
+        tile_strides[current_tile_size] = stride
+        xs = _tile_starts(width, current_tile_size, stride)
+        ys = _tile_starts(height, current_tile_size, stride)
+        for y in ys:
+            for x in xs:
+                crop = image[y : min(height, y + current_tile_size), x : min(width, x + current_tile_size)]
+                if crop.size == 0:
+                    continue
+                tile_count += 1
+                tile_detections, _, _ = yolo_detector.detect_frame(crop)
+                for detection in tile_detections:
+                    x1, y1, x2, y2 = [int(value) for value in detection.get("bbox", [0, 0, 0, 0])]
+                    global_bbox = [
+                        max(0, min(width, x + x1)),
+                        max(0, min(height, y + y1)),
+                        max(0, min(width, x + x2)),
+                        max(0, min(height, y + y2)),
+                    ]
+                    if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
+                        continue
+                    mapped = dict(detection)
+                    mapped["bbox"] = global_bbox
+                    mapped["source_tile"] = {
+                        "x": int(x),
+                        "y": int(y),
+                        "width": int(crop.shape[1]),
+                        "height": int(crop.shape[0]),
+                        "tile_size": int(current_tile_size),
+                    }
+                    raw_detections.append(mapped)
+
+    detections = _nms_detections(raw_detections)
+    annotated = image.copy()
+    for detection in detections:
+        draw_detection(
+            annotated,
+            detection["bbox"],
+            str(detection.get("label") or detection.get("type")),
+            float(detection.get("confidence", 0.0)),
+        )
+
+    annotated_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    compatible_result_image.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(annotated_path), annotated)
+    cv2.imwrite(str(compatible_result_image), annotated)
+    for target in (json_path, compatible_result_json):
+        with target.open("w", encoding="utf-8") as file:
+            json.dump(detections, file, ensure_ascii=False, indent=2)
+
+    details = {
+        "strategy": "tiled_multiscale" if len(tile_sizes) > 1 else "tiled",
+        "tile_size": tile_sizes[0],
+        "tile_sizes": tile_sizes,
+        "tile_overlap": overlap,
+        "tile_stride": tile_strides[tile_sizes[0]],
+        "tile_strides": {str(size): stride for size, stride in tile_strides.items()},
+        "tile_count": tile_count,
+        "raw_detection_count": len(raw_detections),
+        "nms_detection_count": len(detections),
+    }
+    return detections, (time.perf_counter() - start) * 1000.0, details
+
+
 async def capture_frame(
     row: int,
     col: int,
@@ -779,6 +1263,158 @@ def save_simulation_upload(filename: str, content: bytes) -> dict[str, Any]:
     }
 
 
+def _phone_upload_path(upload_id: str) -> Path:
+    if not re.fullmatch(r"[0-9A-Za-z_-]{8,80}", upload_id or ""):
+        raise CameraTriggerError("Invalid phone upload id.")
+    path = (PHONE_UPLOAD_DIR / upload_id).resolve()
+    if not _is_within(path, PHONE_UPLOAD_DIR.resolve()):
+        raise CameraTriggerError("Phone upload path is outside upload root.")
+    return path
+
+
+def _phone_metadata_path(upload_id: str) -> Path:
+    return _phone_upload_path(upload_id) / "metadata.json"
+
+
+def _write_phone_metadata(metadata: dict[str, Any]) -> None:
+    upload_id = str(metadata["upload_id"])
+    metadata_path = _phone_metadata_path(upload_id)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    with metadata_path.open("w", encoding="utf-8") as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2)
+
+
+def _read_phone_metadata(upload_id: str) -> dict[str, Any]:
+    metadata_path = _phone_metadata_path(upload_id)
+    if not metadata_path.exists():
+        raise CameraTriggerError(f"Phone upload does not exist: {upload_id}")
+    with metadata_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _phone_upload_public_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(metadata)
+    payload["ok"] = True
+    return payload
+
+
+def save_phone_upload(filename: str, content: bytes) -> dict[str, Any]:
+    safe_name = _safe_filename(filename)
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in SIMULATION_IMAGE_SUFFIXES:
+        raise CameraTriggerError(
+            f"Unsupported phone image type: {suffix or '(none)'}. "
+            f"Allowed: {', '.join(sorted(SIMULATION_IMAGE_SUFFIXES))}"
+        )
+    if not content:
+        raise CameraTriggerError("Uploaded phone image is empty.")
+    if len(content) > PHONE_MAX_UPLOAD_BYTES:
+        raise CameraTriggerError(f"Uploaded phone image exceeds {PHONE_MAX_UPLOAD_BYTES // 1024 // 1024}MB.")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    upload_id = f"{timestamp}_{os.urandom(4).hex()}"
+    upload_dir = _phone_upload_path(upload_id)
+    incoming_path = upload_dir / f"upload{suffix}"
+    raw_path = upload_dir / "raw.jpg"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    incoming_path.write_bytes(content)
+
+    cv2 = _import_cv2()
+    image = cv2.imread(str(incoming_path))
+    if image is None:
+        try:
+            shutil.rmtree(upload_dir)
+        except OSError:
+            pass
+        raise CameraTriggerError("Uploaded phone image could not be decoded.")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if not cv2.imwrite(str(raw_path), image):
+        try:
+            shutil.rmtree(upload_dir)
+        except OSError:
+            pass
+        raise CameraTriggerError("Uploaded phone image could not be converted to grayscale.")
+    try:
+        incoming_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    height, width = image.shape[:2]
+    metadata = {
+        "upload_id": upload_id,
+        "name": safe_name,
+        "raw_image": _rel(raw_path),
+        "size_bytes": raw_path.stat().st_size,
+        "width": int(width),
+        "height": int(height),
+        "color_mode": "grayscale",
+        "preprocess": ["phone_color_to_gray"],
+        "uploaded_at": _now_iso(),
+        "status": "uploaded",
+        "source": "phone",
+    }
+    _write_phone_metadata(metadata)
+    return _phone_upload_public_payload(metadata)
+
+
+def list_phone_uploads() -> list[dict[str, Any]]:
+    if not PHONE_UPLOAD_DIR.exists():
+        return []
+    uploads: list[dict[str, Any]] = []
+    for child in PHONE_UPLOAD_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        metadata_path = child / "metadata.json"
+        if not metadata_path.exists():
+            continue
+        try:
+            with metadata_path.open("r", encoding="utf-8") as file:
+                uploads.append(_phone_upload_public_payload(json.load(file)))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(uploads, key=lambda item: str(item.get("uploaded_at", "")), reverse=True)
+
+
+def get_phone_upload(upload_id: str) -> dict[str, Any]:
+    return _phone_upload_public_payload(_read_phone_metadata(upload_id))
+
+
+def detect_phone_upload(upload_id: str) -> dict[str, Any]:
+    metadata = _read_phone_metadata(upload_id)
+    raw_path = resolve_artifact(metadata["raw_image"])
+    upload_dir = _phone_upload_path(upload_id)
+    annotated_path = upload_dir / "annotated.jpg"
+    result_json_path = upload_dir / "result.json"
+
+    detections, inference_ms, detection_details = detect_tiled_image(raw_path, annotated_path, result_json_path)
+    metadata.update(
+        {
+            "status": "detected",
+            "detected_at": _now_iso(),
+            "annotated_image": _rel(annotated_path),
+            "result_json": _rel(result_json_path),
+            "defects": detections,
+            "defect_count": len(detections),
+            "inference_ms": round(inference_ms, 2),
+            "detection_strategy": detection_details["strategy"],
+            "detection_details": detection_details,
+            "operation_mode": "phone",
+        }
+    )
+    _write_phone_metadata(metadata)
+    return _phone_upload_public_payload(metadata)
+
+
+def delete_phone_upload(upload_id: str) -> dict[str, Any]:
+    upload_dir = _phone_upload_path(upload_id)
+    if not upload_dir.exists():
+        raise CameraTriggerError(f"Phone upload does not exist: {upload_id}")
+    shutil.rmtree(upload_dir)
+    return {"ok": True, "upload_id": upload_id, "deleted": True}
+
+
 async def capture_simulation_cell(
     row: int,
     col: int,
@@ -804,6 +1440,10 @@ async def capture_simulation_cell(
             scan_id,
             plan,
         )
+        result_json_path = _cell_dir(scan_id, row, col) / "result.json"
+        result_json_path.parent.mkdir(parents=True, exist_ok=True)
+        with result_json_path.open("w", encoding="utf-8") as file:
+            json.dump([], file, ensure_ascii=False, indent=2)
     except Exception as exc:
         return _error("simulation_capture_failed", str(exc), row, col, x, y)
 
@@ -815,10 +1455,42 @@ async def capture_simulation_cell(
         "y_mm": y,
         "raw_image": _rel(raw_path),
         "latest_image": _rel(DEFAULT_IMAGE),
+        "result_json": _rel(result_json_path),
         "capture_ms": round(capture_ms, 2),
         "source_image": _rel(source_path),
         "simulation_crop": crop_meta,
     }
+
+
+def _simulation_pixel_crop_rect(plan: dict[str, Any], source_width: int, source_height: int, row: int, col: int) -> tuple[int, int, int, int]:
+    fov = plan.get("fov_mm") or {"width": 30.0, "height": 30.0}
+    step = plan.get("step_mm") or {"x": fov.get("width", 30.0), "y": fov.get("height", 30.0)}
+    covered = plan.get("covered_mm") or {}
+
+    fov_w = max(float(fov.get("width", 30.0)), 1e-6)
+    fov_h = max(float(fov.get("height", 30.0)), 1e-6)
+    step_x = max(float(step.get("x", fov_w)), 1e-6)
+    step_y = max(float(step.get("y", fov_h)), 1e-6)
+    cols = max(int(plan.get("cols") or 1), 1)
+    rows = max(int(plan.get("rows") or 1), 1)
+    covered_w = max(float(covered.get("length") or ((cols - 1) * step_x + fov_w)), fov_w)
+    covered_h = max(float(covered.get("width") or ((rows - 1) * step_y + fov_h)), fov_h)
+
+    x_start_mm = min(col * step_x, covered_w)
+    y_start_mm = min(row * step_y, covered_h)
+    x_end_mm = min(x_start_mm + fov_w, covered_w)
+    y_end_mm = min(y_start_mm + fov_h, covered_h)
+
+    x1 = int(round((x_start_mm / covered_w) * source_width))
+    y1 = int(round((y_start_mm / covered_h) * source_height))
+    x2 = int(round((x_end_mm / covered_w) * source_width))
+    y2 = int(round((y_end_mm / covered_h) * source_height))
+
+    x1 = max(0, min(source_width - 1, x1))
+    y1 = max(0, min(source_height - 1, y1))
+    x2 = max(x1 + 1, min(source_width, x2))
+    y2 = max(y1 + 1, min(source_height, y2))
+    return x1, y1, x2, y2
 
 
 def _write_simulation_crop(
@@ -827,29 +1499,34 @@ def _write_simulation_crop(
     col: int,
     scan_id: str,
     plan: dict[str, Any],
-) -> tuple[Path, float, dict[str, int]]:
+) -> tuple[Path, float, dict[str, Any]]:
     start = time.perf_counter()
     cv2 = _import_cv2()
     image = cv2.imread(str(source_path))
     if image is None:
         raise CameraTriggerError(f"Could not read simulation image: {source_path}")
 
-    rows = max(1, int(plan.get("rows", 1)))
-    cols = max(1, int(plan.get("cols", 1)))
     height, width = image.shape[:2]
-    cell_w = max(1, int((width + cols - 1) / cols))
-    cell_h = max(1, int((height + rows - 1) / rows))
-    x1 = min(width - 1, max(0, col * cell_w))
-    y1 = min(height - 1, max(0, row * cell_h))
-    x2 = min(width, max(x1 + 1, (col + 1) * cell_w))
-    y2 = min(height, max(y1 + 1, (row + 1) * cell_h))
+    fov = plan.get("fov_mm") or {"width": 30.0, "height": 30.0}
+    step = plan.get("step_mm") or {"x": fov.get("width", 30.0), "y": fov.get("height", 30.0)}
+    origin = plan.get("origin_mm") or {"x": 0.0, "y": 0.0}
+
+    fov_w = float(fov.get("width", 30.0))
+    fov_h = float(fov.get("height", 30.0))
+    step_x = float(step.get("x", fov_w))
+    step_y = float(step.get("y", fov_h))
+    origin_x = float(origin.get("x", 0.0))
+    origin_y = float(origin.get("y", 0.0))
+    x_mm = origin_x + col * step_x
+    y_mm = origin_y + row * step_y
+    x1, y1, x2, y2 = _simulation_pixel_crop_rect(plan, width, height, row, col)
 
     crop = image[y1:y2, x1:x2].copy()
     if crop.size == 0:
         raise CameraTriggerError(f"Simulation crop is empty for row={row}, col={col}.")
 
     cell_dir = _cell_dir(scan_id, row, col)
-    raw_path = cell_dir / "raw.jpg"
+    raw_path = cell_dir / "raw.png"
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_IMAGE.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(raw_path), crop):
@@ -860,6 +1537,11 @@ def _write_simulation_crop(
     crop_meta = {
         "source_width": int(width),
         "source_height": int(height),
+        "pixel_geometry": "source_restore",
+        "x_mm": round(x_mm, 4),
+        "y_mm": round(y_mm, 4),
+        "fov_width_mm": round(fov_w, 4),
+        "fov_height_mm": round(fov_h, 4),
         "x1": int(x1),
         "y1": int(y1),
         "x2": int(x2),

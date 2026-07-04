@@ -6,7 +6,7 @@ This branch contains the web console that connects the PCB AOI workflow:
 - YOLO PCB defect inference
 - XYZ slide-table scan orchestration
 - WebSocket event updates for the browser UI
-- Manual, simulated, real stepped-scan, and continuous video scan workflows
+- Handheld, simulated, real stepped-scan, continuous video scan, and phone-upload workflows
 
 The current UI is designed as a white industrial control panel. It is the
 branch to run when you want to verify the camera, open the web page, test the
@@ -32,6 +32,7 @@ mock/simulation flow, or connect the UI to the hardware and algorithm branches.
 | Simulation mode | Existing PCB image | Upload one or more PCB images and simulate a snake-grid slide scan over the image. |
 | Real mode | Camera + slide table + YOLO | Step the slide to each grid cell, settle, capture one image, run YOLO, then move to the next cell. |
 | Video detection | Camera + slide table + YOLO | Continuous snake scan with live YOLO video and a moving FOV box on the PCB board. |
+| Phone photo | Phone browser + YOLO | Upload phone photos from the same LAN, convert color images to grayscale, then run whole-board tiled YOLO detection. |
 
 ## Quick Start on Windows
 
@@ -47,6 +48,19 @@ Open:
 
 ```text
 http://127.0.0.1:8000/
+```
+
+For LAN phone upload, bind to all interfaces:
+
+```powershell
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Then open the full UI or the phone-only upload page from the phone:
+
+```text
+http://<computer-lan-ip>:8000/
+http://<computer-lan-ip>:8000/phone
 ```
 
 If port `8000` is already occupied, either close the old server or use another
@@ -105,6 +119,46 @@ $env:LOONGSON_AOI_YOLO_CONF = "0.5"
 $env:LOONGSON_AOI_YOLO_IMGSZ = "960"
 ```
 
+## Phone Photo Detection
+
+The phone module is intended for quick LAN capture when the slide table or
+OV9281 is not being used. The phone can either open the complete UI or the
+minimal `/phone` page. The phone page has separate buttons for camera capture
+and gallery selection.
+
+Phone uploads are normalized before inference:
+
+- browser-side conversion from color to grayscale JPEG
+- server-side grayscale conversion as a second safety check
+- original board dimensions are preserved for UI display and box coordinates
+- YOLO inference uses in-memory tiled detection rather than resizing the board
+
+Default tiled detection settings:
+
+```powershell
+$env:LOONGSON_AOI_PHONE_TILE_SIZES = "640,800"
+$env:LOONGSON_AOI_PHONE_TILE_OVERLAP = "0.5"
+```
+
+The `640` tile keeps compatibility with the training image size. The `800`
+tile improves phone whole-board photos where defects are slightly larger or
+where the phone crop differs from the dataset. To force the old single-scale
+behavior:
+
+```powershell
+$env:LOONGSON_AOI_PHONE_TILE_SIZE = "640"
+```
+
+Phone outputs are written under:
+
+```text
+algorithm/outputs/mobile_uploads/<upload_id>/
+  raw.jpg
+  annotated.jpg
+  result.json
+  metadata.json
+```
+
 ## Slide Scan Settings
 
 Common scan and video-scan variables:
@@ -132,6 +186,11 @@ soft-homed before scanning when no limit switches are installed.
 | `GET /api/video/status` | Live YOLO video session status |
 | `GET /api/video/stream.mjpg` | Annotated YOLO video stream |
 | `POST /api/simulation/upload` | Upload PCB images for simulation mode |
+| `GET /phone` | Minimal phone upload page |
+| `POST /api/phone/upload` | Upload phone camera/gallery images |
+| `GET /api/phone/uploads` | List phone upload queue |
+| `POST /api/phone/detect` | Run tiled whole-board YOLO detection on a phone upload |
+| `DELETE /api/phone/uploads/{upload_id}` | Delete a phone upload record and files |
 | `WS /ws/control` | Start/stop scan commands and live events |
 
 ## Validation
@@ -141,6 +200,7 @@ Basic local checks:
 ```powershell
 python -m py_compile main.py camera_trigger.py motor_controller.py
 node --check static/app.js
+python -m unittest test_mosaic
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/system/status
 ```

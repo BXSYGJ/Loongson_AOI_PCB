@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>单板 PCB 智能缺陷检测系统</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260704-sim-original-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260705-phone-3" />
   </head>
   <body>
     <main class="mode-screen" id="modeScreen">
@@ -55,6 +55,15 @@
           <strong>视频检测</strong>
           <span>滑台连续蛇形扫描，PCB 画板同步移动检测区域，视频实时显示 YOLO 标注。</span>
           <em>连续滑台 + 实时 YOLO</em>
+        </button>
+
+        <button class="mode-card" data-mode="phone">
+          <span class="mode-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M8 2h8v20H8zM10 5h4M11 18h2M5 8l-3 3 3 3M19 8l3 3-3 3" /></svg>
+          </span>
+          <strong>手机拍照</strong>
+          <span>同一局域网手机拍照上传 PCB 图片，电脑端选图后执行整图 YOLO 检测。</span>
+          <em>局域网上传 + 整图 YOLO</em>
         </button>
       </section>
     </main>
@@ -178,6 +187,28 @@
               </div>
             </section>
 
+            <section class="panel-section mode-only is-hidden" id="phonePanel" data-visible-mode="phone">
+              <h2>手机拍照上传</h2>
+              <div class="phone-link-box">
+                <span>手机上传页</span>
+                <div id="phoneUploadUrls" class="lan-url-list">等待局域网状态...</div>
+              </div>
+              <label>
+                <span>本机模拟上传</span>
+                <input id="phoneImageFile" type="file" accept="image/*" multiple />
+              </label>
+              <button class="secondary-btn" id="uploadPhoneBtn">上传到手机队列</button>
+              <p class="inline-note" id="phoneUploadStatus">等待手机拍照上传</p>
+              <div class="phone-queue-actions">
+                <button class="mini-btn" id="refreshPhoneUploadsBtn">刷新队列</button>
+                <button class="mini-btn" id="deletePhoneUploadBtn">删除选中</button>
+              </div>
+              <label>
+                <span>已上传照片</span>
+                <select id="phoneUploadSelect" class="source-select"></select>
+              </label>
+            </section>
+
             <section class="panel-section mode-only is-hidden" id="videoPanel" data-visible-mode="video">
               <h2>视频检测参数</h2>
               <label>
@@ -270,6 +301,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260704-sim-original-1"></script>
+    <script src="/static/app.js?v=20260705-phone-4"></script>
   </body>
 </html>

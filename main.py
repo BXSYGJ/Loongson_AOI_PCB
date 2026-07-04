@@ -26,14 +26,15 @@ FOV_HEIGHT_MM = 30.0
 MAX_X_MM = 135.0
 MAX_Y_MM = 135.0
 DEBOUNCE_SECONDS = float(os.getenv("LOONGSON_AOI_DEBOUNCE_SECONDS", "0.05"))
+GRID_OVERLAP = float(os.getenv("LOONGSON_AOI_GRID_OVERLAP", "0.2"))
 VIDEO_SPEED_MM_S = float(os.getenv("LOONGSON_AOI_VIDEO_SPEED_MM_S", "2.0"))
 VIDEO_INFERENCE_FPS = float(os.getenv("LOONGSON_AOI_VIDEO_INFERENCE_FPS", "5.0"))
 VIDEO_PREVIEW_FPS = float(os.getenv("LOONGSON_AOI_VIDEO_PREVIEW_FPS", "8.0"))
 VIDEO_OVERLAP = float(os.getenv("LOONGSON_AOI_VIDEO_OVERLAP", "0.2"))
 MOCK_INFERENCE_SECONDS = 0.35
 LAN_LISTEN_HOST = "0.0.0.0"
-LAN_LISTEN_PORT = 8000
-OPERATION_MODES = {"handheld", "simulation", "real", "video", "mock"}
+LAN_LISTEN_PORT = int(os.getenv("LOONGSON_AOI_LAN_PORT", os.getenv("PORT", "8000")))
+OPERATION_MODES = {"handheld", "simulation", "real", "video", "phone", "mock"}
 
 
 app = FastAPI(title="Loongson AOI PCB Console", version="0.2.0")
@@ -72,7 +73,7 @@ def detect_script_status() -> dict[str, Any]:
         }
 
 
-def system_status() -> dict[str, Any]:
+def system_status(request: Request | None = None) -> dict[str, Any]:
     scan_running = bool(active_scan_task and not active_scan_task.done())
     try:
         motor = motor_controller.get_status()
@@ -107,11 +108,11 @@ def system_status() -> dict[str, Any]:
         },
         "scan": {
             "running": scan_running,
-            "modes": ["handheld", "simulation", "real", "video"],
-            "mode_hint": "handheld uses the real camera without slide motion; simulation uses an uploaded image; real uses stop-and-shoot slide motion; video uses continuous raster motion and live YOLO inference.",
+            "modes": ["handheld", "simulation", "real", "video", "phone"],
+            "mode_hint": "handheld uses the real camera without slide motion; simulation uses an uploaded image; real uses stop-and-shoot slide motion; video uses continuous raster motion and live YOLO inference; phone uses LAN image upload and whole-image YOLO.",
             "video": camera_trigger.video_status(),
         },
-        "network": network_status(),
+        "network": network_status(request),
     }
 
 
@@ -172,14 +173,17 @@ def platform_ipv4_addresses() -> set[str]:
     return set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", result.stdout))
 
 
-def network_status() -> dict[str, Any]:
+def network_status(request: Request | None = None) -> dict[str, Any]:
     ips = local_ipv4_addresses()
+    port = request.url.port if request is not None and request.url.port else LAN_LISTEN_PORT
+    scheme = request.url.scheme if request is not None else "http"
     return {
         "listen_host": LAN_LISTEN_HOST,
-        "port": LAN_LISTEN_PORT,
+        "port": port,
         "lan_ips": ips,
-        "lan_urls": [f"http://{ip}:{LAN_LISTEN_PORT}/" for ip in ips],
-        "hint": "Keep the phone and PC on the same LAN and allow TCP 8000 through the firewall.",
+        "lan_urls": [f"{scheme}://{ip}:{port}/" for ip in ips],
+        "phone_urls": [f"{scheme}://{ip}:{port}/phone" for ip in ips],
+        "hint": f"Keep the phone and PC on the same LAN and allow TCP {port} through the firewall.",
     }
 
 
@@ -194,30 +198,42 @@ def build_grid_plan(
     if origin_x_mm < 0 or origin_y_mm < 0:
         raise ValueError("Origin coordinates must be non-negative.")
 
-    cols = math.ceil(pcb_length_mm / FOV_WIDTH_MM)
-    rows = math.ceil(pcb_width_mm / FOV_HEIGHT_MM)
-    covered_length = cols * FOV_WIDTH_MM
-    covered_width = rows * FOV_HEIGHT_MM
+    overlap = max(0.0, min(0.85, GRID_OVERLAP))
+    step_x = FOV_WIDTH_MM * (1.0 - overlap)
+    step_y = FOV_HEIGHT_MM * (1.0 - overlap)
+
+    def axis_count(size_mm: float, fov_mm: float, step_mm: float) -> int:
+        if size_mm <= fov_mm:
+            return 1
+        return math.ceil((size_mm - fov_mm) / step_mm) + 1
+
+    cols = axis_count(pcb_length_mm, FOV_WIDTH_MM, step_x)
+    rows = axis_count(pcb_width_mm, FOV_HEIGHT_MM, step_y)
+    covered_length = max(0, cols - 1) * step_x + FOV_WIDTH_MM
+    covered_width = max(0, rows - 1) * step_y + FOV_HEIGHT_MM
     overflow_right = max(0.0, covered_length - pcb_length_mm)
     overflow_bottom = max(0.0, covered_width - pcb_width_mm)
 
-    max_x = origin_x_mm + max(cols - 1, 0) * FOV_WIDTH_MM
-    max_y = origin_y_mm + max(rows - 1, 0) * FOV_HEIGHT_MM
+    max_x = origin_x_mm + max(cols - 1, 0) * step_x
+    max_y = origin_y_mm + max(rows - 1, 0) * step_y
     if max_x > MAX_X_MM or max_y > MAX_Y_MM:
         raise ValueError(
             f"Grid exceeds slide travel: max_x={max_x:.2f}mm, max_y={max_y:.2f}mm, "
             f"limit={MAX_X_MM:.2f}x{MAX_Y_MM:.2f}mm."
         )
 
-    visible_last_col = (pcb_length_mm - (cols - 1) * FOV_WIDTH_MM) / FOV_WIDTH_MM if cols else 1.0
-    visible_last_row = (pcb_width_mm - (rows - 1) * FOV_HEIGHT_MM) / FOV_HEIGHT_MM if rows else 1.0
+    visible_last_col = (pcb_length_mm - (cols - 1) * step_x) / FOV_WIDTH_MM if cols else 1.0
+    visible_last_row = (pcb_width_mm - (rows - 1) * step_y) / FOV_HEIGHT_MM if rows else 1.0
 
     return {
+        "scan_type": "stepped_grid",
         "rows": rows,
         "cols": cols,
         "fov_mm": {"width": FOV_WIDTH_MM, "height": FOV_HEIGHT_MM},
+        "step_mm": {"x": round(step_x, 4), "y": round(step_y, 4)},
+        "overlap": round(overlap, 4),
         "pcb_mm": {"length": pcb_length_mm, "width": pcb_width_mm},
-        "covered_mm": {"length": covered_length, "width": covered_width},
+        "covered_mm": {"length": round(covered_length, 4), "width": round(covered_width, 4)},
         "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
         "logical_boundary": {
             "overflow_right_mm": round(overflow_right, 4),
@@ -234,6 +250,9 @@ def iter_snake_cells(plan: dict[str, Any]) -> list[dict[str, float | int]]:
     rows = int(plan["rows"])
     cols = int(plan["cols"])
     origin = plan["origin_mm"]
+    step = plan.get("step_mm") or plan.get("fov_mm")
+    step_x = float(step["x"] if "x" in step else step["width"])
+    step_y = float(step["y"] if "y" in step else step["height"])
     cells: list[dict[str, float | int]] = []
 
     for row in range(rows):
@@ -243,8 +262,8 @@ def iter_snake_cells(plan: dict[str, Any]) -> list[dict[str, float | int]]:
                 {
                     "row": row,
                     "col": col,
-                    "x_mm": float(origin["x"]) + col * FOV_WIDTH_MM,
-                    "y_mm": float(origin["y"]) + row * FOV_HEIGHT_MM,
+                    "x_mm": round(float(origin["x"]) + col * step_x, 4),
+                    "y_mm": round(float(origin["y"]) + row * step_y, 4),
                 }
             )
     return cells
@@ -379,6 +398,30 @@ async def run_scan(
     plan_payload = dict(plan)
     plan_payload["operation_mode"] = operation_mode
     await send_packet(websocket, "grid_plan", plan_payload, scan_id)
+    manifest_cells: dict[str, dict[str, Any]] = {}
+
+    def update_manifest_cell(row: int, col: int, data: dict[str, Any]) -> None:
+        key = f"{row}:{col}"
+        cell = manifest_cells.setdefault(
+            key,
+            {
+                "row": row,
+                "col": col,
+                "x_mm": data.get("x_mm"),
+                "y_mm": data.get("y_mm"),
+                "status": "planned",
+            },
+        )
+        cell.update({key: value for key, value in data.items() if value is not None})
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            operation_mode,
+            list(manifest_cells.values()),
+            status="running",
+        )
+
+    camera_trigger.write_scan_manifest(scan_id, plan_payload, operation_mode, [], status="running")
 
     for index, cell in enumerate(cells, start=1):
         if stop_event.is_set():
@@ -394,6 +437,7 @@ async def run_scan(
         col = int(cell["col"])
         x_mm = float(cell["x_mm"])
         y_mm = float(cell["y_mm"])
+        update_manifest_cell(row, col, {"x_mm": x_mm, "y_mm": y_mm, "status": "moving"})
 
         await send_packet(
             websocket,
@@ -482,24 +526,40 @@ async def run_scan(
                 capture = await camera_trigger.capture_frame(row, col, x_mm, y_mm, scan_id, stop_event)
 
             if not capture.get("ok"):
+                update_manifest_cell(
+                    row,
+                    col,
+                    {
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                        "status": "capture_failed",
+                        "error": capture.get("error"),
+                        "message": capture.get("message"),
+                    },
+                )
                 packet_type = "scan_stopped" if capture.get("error") == "scan_stopped" else "scan_error"
                 await send_packet(websocket, packet_type, capture, scan_id)
                 return
 
-            if stop_event.is_set():
-                await send_packet(
-                    websocket,
-                    "scan_stopped",
-                    {"message": "Scan stopped after frame capture.", "progress": {"done": index - 1, "total": total}},
-                    scan_id,
-                )
-                return
-
+            update_manifest_cell(
+                row,
+                col,
+                {
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "status": "captured",
+                    "raw_image": capture.get("raw_image"),
+                    "latest_image": capture.get("latest_image"),
+                    "capture_ms": capture.get("capture_ms"),
+                    "source_image": capture.get("source_image"),
+                    "simulation_crop": capture.get("simulation_crop"),
+                },
+            )
             await send_packet(
                 websocket,
                 "scan_phase",
                 {
-                    "phase": "detect_inference",
+                    "phase": "capture_frame",
                     "row": row,
                     "col": col,
                     "x_mm": x_mm,
@@ -510,26 +570,93 @@ async def run_scan(
                 },
                 scan_id,
             )
-            result = await camera_trigger.detect_captured_frame(
-                row,
-                col,
-                x_mm,
-                y_mm,
-                scan_id,
-                capture["raw_image"],
-                stop_event,
-            )
-            if result.get("ok"):
-                result["capture_ms"] = capture.get("capture_ms")
-                if capture.get("source_image"):
-                    result["source_image"] = capture.get("source_image")
-                if capture.get("simulation_crop"):
-                    result["simulation_crop"] = capture.get("simulation_crop")
+
+            if stop_event.is_set():
+                await send_packet(
+                    websocket,
+                    "scan_stopped",
+                    {"message": "Scan stopped after frame capture.", "progress": {"done": index - 1, "total": total}},
+                    scan_id,
+                )
+                return
+
+            if operation_mode == "simulation":
+                result = {
+                    "ok": True,
+                    "row": row,
+                    "col": col,
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "raw_image": capture.get("raw_image"),
+                    "annotated_image": capture.get("raw_image"),
+                    "result_json": capture.get("result_json"),
+                    "defects": [],
+                    "capture_ms": capture.get("capture_ms"),
+                    "inference_ms": None,
+                    "source_image": capture.get("source_image"),
+                    "simulation_crop": capture.get("simulation_crop"),
+                }
+            else:
+                await send_packet(
+                    websocket,
+                    "scan_phase",
+                    {
+                        "phase": "detect_inference",
+                        "row": row,
+                        "col": col,
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                        "raw_image": capture.get("raw_image"),
+                        "capture_ms": capture.get("capture_ms"),
+                        "source": capture_source,
+                    },
+                    scan_id,
+                )
+                result = await camera_trigger.detect_captured_frame(
+                    row,
+                    col,
+                    x_mm,
+                    y_mm,
+                    scan_id,
+                    capture["raw_image"],
+                    stop_event,
+                )
+                if result.get("ok"):
+                    result["capture_ms"] = capture.get("capture_ms")
 
         if not result.get("ok"):
+            update_manifest_cell(
+                row,
+                col,
+                {
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "status": "detect_failed",
+                    "error": result.get("error"),
+                    "message": result.get("message"),
+                },
+            )
             packet_type = "scan_stopped" if result.get("error") == "scan_stopped" else "scan_error"
             await send_packet(websocket, packet_type, result, scan_id)
             return
+
+        update_manifest_cell(
+            row,
+            col,
+            {
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "status": "detected",
+                "raw_image": result.get("raw_image"),
+                "annotated_image": result.get("annotated_image"),
+                "result_json": result.get("result_json"),
+                "defects": result.get("defects", []),
+                "capture_ms": result.get("capture_ms"),
+                "inference_ms": result.get("inference_ms"),
+                "source_image": result.get("source_image"),
+                "simulation_crop": result.get("simulation_crop"),
+            },
+        )
 
         await send_packet(
             websocket,
@@ -586,6 +713,49 @@ async def run_scan(
             )
             return
 
+    mosaic_payload: dict[str, Any] | None = None
+    if operation_mode in {"real", "simulation"}:
+        await send_packet(
+            websocket,
+            "scan_phase",
+            {"phase": "mosaic_stitching", "operation_mode": operation_mode, "cell_count": len(manifest_cells)},
+            scan_id,
+        )
+        await send_packet(
+            websocket,
+            "scan_phase",
+            {"phase": "mosaic_detecting", "operation_mode": operation_mode, "cell_count": len(manifest_cells)},
+            scan_id,
+        )
+        try:
+            mosaic_payload = await asyncio.to_thread(camera_trigger.build_scan_mosaic, scan_id, True)
+            camera_trigger.write_scan_manifest(
+                scan_id,
+                plan_payload,
+                operation_mode,
+                list(manifest_cells.values()),
+                status="complete",
+                extra={"mosaic": mosaic_payload},
+            )
+            await send_packet(websocket, "mosaic_result", mosaic_payload, scan_id)
+        except Exception as exc:
+            camera_trigger.write_scan_manifest(
+                scan_id,
+                plan_payload,
+                operation_mode,
+                list(manifest_cells.values()),
+                status="complete_with_mosaic_error",
+                extra={"mosaic_error": str(exc)},
+            )
+            await send_packet(
+                websocket,
+                "mosaic_error",
+                {"message": f"Mosaic stitching or detection failed: {exc}", "operation_mode": operation_mode},
+                scan_id,
+            )
+    else:
+        camera_trigger.write_scan_manifest(scan_id, plan_payload, operation_mode, list(manifest_cells.values()), status="complete")
+
     await send_packet(
         websocket,
         "scan_complete",
@@ -596,6 +766,7 @@ async def run_scan(
             "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
             "operation_mode": operation_mode,
             "return_motion": "physical" if motion_enabled else "simulated",
+            "mosaic": mosaic_payload,
         },
         scan_id,
     )
@@ -856,6 +1027,42 @@ async def run_handheld_detection(
         camera_trigger.stop_video_detection()
 
 
+async def run_phone_detection(websocket: WebSocket, scan_id: str, upload_id: str, stop_event: asyncio.Event) -> None:
+    try:
+        selected = await asyncio.to_thread(camera_trigger.get_phone_upload, upload_id)
+        selected["operation_mode"] = "phone"
+        await send_packet(websocket, "phone_upload_selected", selected, scan_id)
+        if stop_event.is_set():
+            await send_packet(
+                websocket,
+                "phone_error",
+                {"upload_id": upload_id, "message": "Phone detection stopped before inference.", "operation_mode": "phone"},
+                scan_id,
+            )
+            return
+        await send_packet(
+            websocket,
+            "phone_detecting",
+            {
+                "upload_id": upload_id,
+                "raw_image": selected.get("raw_image"),
+                "operation_mode": "phone",
+                "message": "Running whole-image YOLO inference.",
+            },
+            scan_id,
+        )
+        result = await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id)
+        result["operation_mode"] = "phone"
+        await send_packet(websocket, "phone_result", result, scan_id)
+    except Exception as exc:
+        await send_packet(
+            websocket,
+            "phone_error",
+            {"upload_id": upload_id, "message": str(exc), "operation_mode": "phone"},
+            scan_id,
+        )
+
+
 async def mock_capture_detect_and_read(
     row: int,
     col: int,
@@ -915,6 +1122,9 @@ def normalize_operation_mode(payload: dict[str, Any]) -> tuple[str, str]:
         "hardware": "real",
         "video": "video",
         "video_detection": "video",
+        "phone": "phone",
+        "mobile": "phone",
+        "mobile_upload": "phone",
         "mock": "mock",
     }
 
@@ -922,11 +1132,11 @@ def normalize_operation_mode(payload: dict[str, Any]) -> tuple[str, str]:
         operation_mode = "mock" if capture_mode == "mock" else "real"
     operation_mode = aliases.get(operation_mode, operation_mode)
     if operation_mode not in OPERATION_MODES:
-        raise ValueError("operation_mode must be handheld, simulation, real, video, or mock.")
+        raise ValueError("operation_mode must be handheld, simulation, real, video, phone, or mock.")
 
     if capture_mode not in {"mock", "real"}:
         capture_mode = "mock" if operation_mode == "mock" else "real"
-    if operation_mode in {"handheld", "simulation", "real"}:
+    if operation_mode in {"handheld", "simulation", "real", "phone"}:
         capture_mode = "real"
     return operation_mode, capture_mode
 
@@ -934,6 +1144,11 @@ def normalize_operation_mode(payload: dict[str, Any]) -> tuple[str, str]:
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/phone")
+async def phone_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "phone.html")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -947,8 +1162,8 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/api/system/status")
-async def api_system_status() -> dict[str, Any]:
-    return system_status()
+async def api_system_status(request: Request) -> dict[str, Any]:
+    return system_status(request)
 
 
 @app.get("/api/camera/status")
@@ -989,6 +1204,46 @@ async def api_simulation_upload(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/phone/upload")
+async def api_phone_upload(
+    request: Request,
+    filename: str = Query("phone-pcb.jpg"),
+) -> dict[str, Any]:
+    try:
+        content = await request.body()
+        return camera_trigger.save_phone_upload(filename, content)
+    except camera_trigger.CameraTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/phone/uploads")
+async def api_phone_uploads() -> dict[str, Any]:
+    return {"ok": True, "uploads": camera_trigger.list_phone_uploads()}
+
+
+@app.post("/api/phone/detect")
+async def api_phone_detect(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+    upload_id = str(payload.get("upload_id", "")).strip()
+    if not upload_id:
+        raise HTTPException(status_code=400, detail="upload_id is required.")
+    try:
+        return await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id)
+    except camera_trigger.CameraTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/phone/uploads/{upload_id}")
+async def api_phone_delete(upload_id: str) -> dict[str, Any]:
+    try:
+        return camera_trigger.delete_phone_upload(upload_id)
+    except camera_trigger.CameraTriggerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/artifact")
 async def api_artifact(path: str = Query(...)) -> FileResponse:
     try:
@@ -999,8 +1254,8 @@ async def api_artifact(path: str = Query(...)) -> FileResponse:
 
 
 @app.get("/api/network/status")
-async def api_network_status() -> dict[str, Any]:
-    return network_status()
+async def api_network_status(request: Request) -> dict[str, Any]:
+    return network_status(request)
 
 
 @app.get("/api/grid/preview")
@@ -1121,6 +1376,41 @@ async def websocket_control(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if packet_type == "start_phone_detection":
+                if scan_lock.locked() or (active_scan_task and not active_scan_task.done()):
+                    await send_packet(websocket, "phone_error", {"request_id": request_id, "message": "Another scan is already running."})
+                    continue
+
+                upload_id = str(payload.get("upload_id", "")).strip()
+                if not upload_id:
+                    await send_packet(websocket, "phone_error", {"request_id": request_id, "message": "upload_id is required."})
+                    continue
+
+                scan_id = str(uuid.uuid4())
+                stop_event = asyncio.Event()
+                active_stop_event = stop_event
+
+                async def locked_phone_detection() -> None:
+                    global active_stop_event
+                    async with scan_lock:
+                        try:
+                            await run_phone_detection(websocket, scan_id, upload_id, stop_event)
+                        finally:
+                            active_stop_event = None
+
+                active_scan_task = asyncio.create_task(locked_phone_detection())
+                await send_packet(
+                    websocket,
+                    "ack",
+                    {
+                        "request_id": request_id,
+                        "scan_id": scan_id,
+                        "operation_mode": "phone",
+                        "message": "start_phone_detection accepted.",
+                    },
+                )
+                continue
+
             if packet_type == "start_video_scan":
                 if scan_lock.locked() or (active_scan_task and not active_scan_task.done()):
                     await send_packet(websocket, "video_error", {"request_id": request_id, "message": "Another scan is already running."})
@@ -1179,6 +1469,8 @@ async def websocket_control(websocket: WebSocket) -> None:
                         raise ValueError("Use start_video_scan for continuous video detection mode.")
                     if operation_mode == "handheld":
                         raise ValueError("Use start_handheld_detection for handheld realtime detection mode.")
+                    if operation_mode == "phone":
+                        raise ValueError("Use start_phone_detection for phone upload detection mode.")
                 except (KeyError, TypeError, ValueError) as exc:
                     await send_packet(websocket, "scan_error", {"request_id": request_id, "message": str(exc)})
                     continue

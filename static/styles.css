@@ -109,10 +109,10 @@ svg {
 }
 
 .mode-grid {
-  width: min(1180px, 100%);
+  width: min(1360px, 100%);
   margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 18px;
 }
 
@@ -315,6 +315,7 @@ label span,
   display: grid;
   grid-template-columns: minmax(560px, 1fr) 372px;
   gap: 12px;
+  align-items: start;
 }
 
 .scan-panel {
@@ -367,6 +368,7 @@ label span,
 
 .canvas-wrap {
   min-height: 0;
+  height: clamp(420px, 58vh, 660px);
   position: relative;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -382,6 +384,7 @@ label span,
 
 .preview-panel {
   min-width: 0;
+  max-width: 100%;
   align-self: start;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -391,12 +394,19 @@ label span,
   align-content: start;
   gap: 10px;
   background: var(--panel-soft);
+  overflow: hidden;
 }
 
 .camera-preview {
   position: relative;
-  min-height: 180px;
-  aspect-ratio: 16 / 10;
+  width: 100%;
+  width: -webkit-fill-available;
+  box-sizing: border-box;
+  justify-self: stretch;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  height: clamp(170px, 18vw, 240px);
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: #eef3f8;
@@ -404,7 +414,10 @@ label span,
 }
 
 .camera-preview img {
+  position: absolute;
+  inset: 0;
   width: 100%;
+  max-width: 100%;
   height: 100%;
   display: block;
   object-fit: contain;
@@ -435,6 +448,7 @@ label span,
 }
 
 .preview-meta {
+  min-width: 0;
   display: grid;
   gap: 3px;
   padding: 8px;
@@ -444,6 +458,9 @@ label span,
 }
 
 .preview-meta strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
   color: var(--text);
   font-size: 13px;
 }
@@ -537,10 +554,16 @@ label span,
 }
 
 .panel-title-row {
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.panel-title-row h2,
+.panel-title-row h3 {
+  min-width: 0;
 }
 
 label {
@@ -684,6 +707,27 @@ select:disabled {
 
 .lan-url-list a:hover {
   color: var(--green);
+}
+
+.phone-link-box {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.phone-link-box > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.phone-queue-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .status-ok {
