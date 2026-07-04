@@ -132,17 +132,20 @@ Phone uploads are normalized before inference:
 - server-side grayscale conversion as a second safety check
 - original board dimensions are preserved for UI display and box coordinates
 - YOLO inference uses in-memory tiled detection rather than resizing the board
+- several tile profiles are tested, and the profile with the highest detection
+  confidence is used for the final annotated image and JSON
 
 Default tiled detection settings:
 
 ```powershell
-$env:LOONGSON_AOI_PHONE_TILE_SIZES = "640,800"
+$env:LOONGSON_AOI_PHONE_TILE_SIZES = "512,640,800"
+$env:LOONGSON_AOI_PHONE_IMGSZS = "960"
 $env:LOONGSON_AOI_PHONE_TILE_OVERLAP = "0.5"
 ```
 
-The `640` tile keeps compatibility with the training image size. The `800`
-tile improves phone whole-board photos where defects are slightly larger or
-where the phone crop differs from the dataset. To force the old single-scale
+The `640` tile keeps compatibility with the training image size. The `512` and
+`800` tiles give the detector alternate object scales when phone photos are
+cropped or framed differently from the dataset. To force the old single-scale
 behavior:
 
 ```powershell

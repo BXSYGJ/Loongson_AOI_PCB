@@ -154,7 +154,7 @@ class ScanMosaicTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def detect_frame(self, frame, annotated_path=None):
+            def detect_frame(self, frame, annotated_path=None, imgsz=None):
                 self.calls += 1
                 if self.calls != 2:
                     return [], frame.copy(), 1.0
@@ -202,7 +202,7 @@ class ScanMosaicTests(unittest.TestCase):
             remove_tree_retry(upload_dir)
 
         class FakeDetector:
-            def detect_frame(self, frame, annotated_path=None):
+            def detect_frame(self, frame, annotated_path=None, imgsz=None):
                 if frame.shape[0] != 40 or frame.shape[1] != 40:
                     return [], frame.copy(), 1.0
                 return [
@@ -230,12 +230,67 @@ class ScanMosaicTests(unittest.TestCase):
                 overlap=0.0,
             )
 
-            self.assertEqual(details["strategy"], "tiled_multiscale")
+            self.assertEqual(details["strategy"], "best_confidence_profile")
             self.assertEqual(details["tile_sizes"], [32, 40])
+            self.assertEqual(details["selected_profile"]["tile_size"], 40)
             self.assertEqual(details["tile_count"], 5)
             self.assertEqual(len(detections), 1)
             self.assertEqual(detections[0]["bbox"], [10, 11, 20, 22])
             self.assertEqual(detections[0]["source_tile"]["tile_size"], 40)
+        finally:
+            camera_trigger.yolo_detector = original_detector
+            if upload_dir.exists():
+                remove_tree_retry(upload_dir)
+
+    def test_tiled_phone_detection_selects_highest_confidence_profile(self):
+        upload_id = f"unit-phone-best-profile-{uuid.uuid4().hex[:8]}"
+        upload_dir = camera_trigger.PHONE_UPLOAD_DIR / upload_id
+        if upload_dir.exists():
+            remove_tree_retry(upload_dir)
+
+        class FakeDetector:
+            def detect_frame(self, frame, annotated_path=None, imgsz=None):
+                if frame.shape[0] == 32 and frame.shape[1] == 32:
+                    return [
+                        {
+                            "type": "short_circuit",
+                            "label": "short_circuit",
+                            "bbox": [2, 2, 12, 12],
+                            "confidence": 0.52,
+                        }
+                    ], frame.copy(), 1.0
+                if frame.shape[0] == 40 and frame.shape[1] == 40:
+                    return [
+                        {
+                            "type": "improper_installation",
+                            "label": "improper_installation",
+                            "bbox": [10, 11, 20, 22],
+                            "confidence": 0.88,
+                        }
+                    ], frame.copy(), 1.0
+                return [], frame.copy(), 1.0
+
+        original_detector = camera_trigger.yolo_detector
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = upload_dir / "raw.jpg"
+            image = np.full((40, 40, 3), 80, dtype=np.uint8)
+            cv2.imwrite(str(raw_path), image)
+
+            camera_trigger.yolo_detector = FakeDetector()
+            detections, _, details = camera_trigger.detect_tiled_image(
+                raw_path,
+                upload_dir / "annotated.jpg",
+                upload_dir / "result.json",
+                tile_size=[32, 40],
+                overlap=0.0,
+            )
+
+            self.assertEqual(details["strategy"], "best_confidence_profile")
+            self.assertEqual(details["selected_profile"]["tile_size"], 40)
+            self.assertEqual(len(detections), 1)
+            self.assertEqual(detections[0]["type"], "improper_installation")
+            self.assertEqual(detections[0]["confidence"], 0.88)
         finally:
             camera_trigger.yolo_detector = original_detector
             if upload_dir.exists():

@@ -97,8 +97,9 @@ _PHONE_TILE_SIZE_ENV = os.getenv("LOONGSON_AOI_PHONE_TILE_SIZE")
 PHONE_TILE_SIZE = _env_int("LOONGSON_AOI_PHONE_TILE_SIZE", 640)
 PHONE_TILE_SIZES = _env_int_list(
     "LOONGSON_AOI_PHONE_TILE_SIZES",
-    (PHONE_TILE_SIZE,) if _PHONE_TILE_SIZE_ENV else (640, 800),
+    (PHONE_TILE_SIZE,) if _PHONE_TILE_SIZE_ENV else (512, 640, 800),
 )
+PHONE_IMGSZS = _env_int_list("LOONGSON_AOI_PHONE_IMGSZS", (_env_int("LOONGSON_AOI_YOLO_IMGSZ", 960),))
 PHONE_TILE_OVERLAP = _env_float("LOONGSON_AOI_PHONE_TILE_OVERLAP", 0.5)
 VIDEO_DEFAULT_INFERENCE_FPS = _env_float("LOONGSON_AOI_VIDEO_INFERENCE_FPS", 5.0)
 VIDEO_DEFAULT_PREVIEW_FPS = _env_float("LOONGSON_AOI_VIDEO_PREVIEW_FPS", 8.0)
@@ -471,16 +472,22 @@ class YoloDetector:
 
         return detections, (time.perf_counter() - start) * 1000.0
 
-    def detect_frame(self, frame: Any, annotated_path: Path | None = None) -> tuple[list[dict[str, Any]], Any, float]:
+    def detect_frame(
+        self,
+        frame: Any,
+        annotated_path: Path | None = None,
+        imgsz: int | None = None,
+    ) -> tuple[list[dict[str, Any]], Any, float]:
         start = time.perf_counter()
         image = _normalize_frame(frame).copy()
+        predict_imgsz = int(imgsz or self.imgsz)
 
         with self._lock:
             self.ensure_loaded()
             assert self._model is not None
             assert self._names is not None
             assert self._cn_names is not None
-            results = self._model.predict(source=image, conf=self.conf, imgsz=self.imgsz, verbose=False)
+            results = self._model.predict(source=image, conf=self.conf, imgsz=predict_imgsz, verbose=False)
 
             detections: list[dict[str, Any]] = []
             for box in results[0].boxes:
@@ -1116,6 +1123,7 @@ def detect_tiled_image(
     annotated_path: Path,
     json_path: Path,
     tile_size: int | list[int] | tuple[int, ...] = PHONE_TILE_SIZES,
+    imgsz: int | list[int] | tuple[int, ...] | None = PHONE_IMGSZS,
     overlap: float = PHONE_TILE_OVERLAP,
     compatible_result_image: Path = RESULT_IMAGE,
     compatible_result_json: Path = RESULT_JSON,
@@ -1137,44 +1145,87 @@ def detect_tiled_image(
         normalized = max(32, requested)
         if normalized not in tile_sizes:
             tile_sizes.append(normalized)
+    if imgsz is None:
+        requested_imgszs = [int(yolo_detector.imgsz)]
+    elif isinstance(imgsz, (list, tuple, set)):
+        requested_imgszs = [int(value) for value in imgsz]
+    else:
+        requested_imgszs = [int(imgsz)]
+    imgszs: list[int] = []
+    for requested in requested_imgszs:
+        normalized = max(32, requested)
+        if normalized not in imgszs:
+            imgszs.append(normalized)
 
-    raw_detections: list[dict[str, Any]] = []
-    tile_count = 0
+    profile_results: list[dict[str, Any]] = []
     tile_strides: dict[int, int] = {}
     for current_tile_size in tile_sizes:
         stride = max(1, int(round(current_tile_size * (1.0 - overlap))))
         tile_strides[current_tile_size] = stride
         xs = _tile_starts(width, current_tile_size, stride)
         ys = _tile_starts(height, current_tile_size, stride)
-        for y in ys:
-            for x in xs:
-                crop = image[y : min(height, y + current_tile_size), x : min(width, x + current_tile_size)]
-                if crop.size == 0:
-                    continue
-                tile_count += 1
-                tile_detections, _, _ = yolo_detector.detect_frame(crop)
-                for detection in tile_detections:
-                    x1, y1, x2, y2 = [int(value) for value in detection.get("bbox", [0, 0, 0, 0])]
-                    global_bbox = [
-                        max(0, min(width, x + x1)),
-                        max(0, min(height, y + y1)),
-                        max(0, min(width, x + x2)),
-                        max(0, min(height, y + y2)),
-                    ]
-                    if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
+        for current_imgsz in imgszs:
+            raw_detections: list[dict[str, Any]] = []
+            tile_count = 0
+            for y in ys:
+                for x in xs:
+                    crop = image[y : min(height, y + current_tile_size), x : min(width, x + current_tile_size)]
+                    if crop.size == 0:
                         continue
-                    mapped = dict(detection)
-                    mapped["bbox"] = global_bbox
-                    mapped["source_tile"] = {
-                        "x": int(x),
-                        "y": int(y),
-                        "width": int(crop.shape[1]),
-                        "height": int(crop.shape[0]),
-                        "tile_size": int(current_tile_size),
-                    }
-                    raw_detections.append(mapped)
+                    tile_count += 1
+                    tile_detections, _, _ = yolo_detector.detect_frame(crop, imgsz=current_imgsz)
+                    for detection in tile_detections:
+                        x1, y1, x2, y2 = [int(value) for value in detection.get("bbox", [0, 0, 0, 0])]
+                        global_bbox = [
+                            max(0, min(width, x + x1)),
+                            max(0, min(height, y + y1)),
+                            max(0, min(width, x + x2)),
+                            max(0, min(height, y + y2)),
+                        ]
+                        if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
+                            continue
+                        mapped = dict(detection)
+                        mapped["bbox"] = global_bbox
+                        mapped["source_tile"] = {
+                            "x": int(x),
+                            "y": int(y),
+                            "width": int(crop.shape[1]),
+                            "height": int(crop.shape[0]),
+                            "tile_size": int(current_tile_size),
+                            "imgsz": int(current_imgsz),
+                        }
+                        raw_detections.append(mapped)
 
-    detections = _nms_detections(raw_detections)
+            profile_detections = _nms_detections(raw_detections)
+            best_confidence = max((float(item.get("confidence", 0.0)) for item in profile_detections), default=0.0)
+            profile_results.append(
+                {
+                    "tile_size": int(current_tile_size),
+                    "imgsz": int(current_imgsz),
+                    "tile_stride": int(stride),
+                    "tile_count": int(tile_count),
+                    "raw_detection_count": len(raw_detections),
+                    "nms_detection_count": len(profile_detections),
+                    "best_confidence": round(best_confidence, 4),
+                    "detections": profile_detections,
+                }
+            )
+
+    selected_profile = max(
+        profile_results,
+        key=lambda item: (float(item["best_confidence"]), int(item["nms_detection_count"])),
+        default={
+            "tile_size": tile_sizes[0],
+            "imgsz": imgszs[0],
+            "tile_stride": tile_strides[tile_sizes[0]],
+            "tile_count": 0,
+            "raw_detection_count": 0,
+            "nms_detection_count": 0,
+            "best_confidence": 0.0,
+            "detections": [],
+        },
+    )
+    detections = list(selected_profile["detections"])
     annotated = image.copy()
     for detection in detections:
         draw_detection(
@@ -1194,15 +1245,38 @@ def detect_tiled_image(
             json.dump(detections, file, ensure_ascii=False, indent=2)
 
     details = {
-        "strategy": "tiled_multiscale" if len(tile_sizes) > 1 else "tiled",
-        "tile_size": tile_sizes[0],
+        "strategy": "best_confidence_profile" if len(profile_results) > 1 else "tiled",
+        "selection_metric": "max_best_confidence",
+        "selected_profile": {
+            "tile_size": int(selected_profile["tile_size"]),
+            "imgsz": int(selected_profile["imgsz"]),
+            "tile_stride": int(selected_profile["tile_stride"]),
+            "tile_count": int(selected_profile["tile_count"]),
+            "best_confidence": float(selected_profile["best_confidence"]),
+        },
+        "tile_size": int(selected_profile["tile_size"]),
         "tile_sizes": tile_sizes,
+        "imgsz": int(selected_profile["imgsz"]),
+        "imgszs": imgszs,
         "tile_overlap": overlap,
-        "tile_stride": tile_strides[tile_sizes[0]],
+        "tile_stride": int(selected_profile["tile_stride"]),
         "tile_strides": {str(size): stride for size, stride in tile_strides.items()},
-        "tile_count": tile_count,
-        "raw_detection_count": len(raw_detections),
+        "tile_count": sum(int(profile["tile_count"]) for profile in profile_results),
+        "selected_tile_count": int(selected_profile["tile_count"]),
+        "raw_detection_count": int(selected_profile["raw_detection_count"]),
         "nms_detection_count": len(detections),
+        "profile_summaries": [
+            {
+                "tile_size": int(profile["tile_size"]),
+                "imgsz": int(profile["imgsz"]),
+                "tile_stride": int(profile["tile_stride"]),
+                "tile_count": int(profile["tile_count"]),
+                "raw_detection_count": int(profile["raw_detection_count"]),
+                "nms_detection_count": int(profile["nms_detection_count"]),
+                "best_confidence": float(profile["best_confidence"]),
+            }
+            for profile in profile_results
+        ],
     }
     return detections, (time.perf_counter() - start) * 1000.0, details
 
