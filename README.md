@@ -7,6 +7,11 @@ training, evaluation, single-image inference, and standalone camera inference.
 The UI integration branch can reuse the trained weights and output format from
 this branch.
 
+The current UI branch also uses these weights for phone-upload detection. Phone
+photos are converted to grayscale and then evaluated with tiled whole-board
+inference so the original phone image is not simply resized down to one YOLO
+input.
+
 ## Directory Layout
 
 | Path | Purpose |
@@ -132,6 +137,26 @@ The JSON format is compatible with the UI branch:
   }
 ]
 ```
+
+## Phone-Photo Integration Notes
+
+The training package currently uses square `640x640` PCB defect images. Phone
+whole-board photos can be much wider, for example `1600x894`, so direct
+whole-image inference may miss defects after resizing. The `ui-integration`
+branch compensates by running tiled detection over phone uploads.
+
+Default UI phone-tile settings:
+
+```powershell
+$env:LOONGSON_AOI_PHONE_TILE_SIZES = "640,800"
+$env:LOONGSON_AOI_PHONE_TILE_OVERLAP = "0.5"
+$env:LOONGSON_AOI_YOLO_CONF = "0.5"
+$env:LOONGSON_AOI_YOLO_IMGSZ = "960"
+```
+
+For future model improvement, add representative phone whole-board photos to
+the dataset and label the same defect classes. This will reduce the gap between
+training crops and field photos.
 
 ## Standalone Camera Detection
 
