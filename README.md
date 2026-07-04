@@ -142,6 +142,32 @@ The function is still bounded by the configured software travel limits. Without
 limit switches or encoders, returning to origin depends on the stepper motors
 not losing steps.
 
+## UI Integration Notes
+
+The `ui-integration` branch currently uses this driver in two slide-table
+workflows:
+
+- Real stepped scan: move to each XY grid point, settle, capture one frame,
+  run YOLO, then continue the snake path.
+- Continuous video scan: move long X segments at a configured speed while the
+  UI draws the current FOV box and the camera stream runs YOLO inference.
+
+The phone-photo and handheld-detection modes in the UI branch do not move the
+slide table and do not require soft home. They are useful for camera/model
+debugging while the hardware is disconnected.
+
+When testing hardware from the UI branch, keep these assumptions aligned:
+
+```powershell
+$env:LOONGSON_AOI_HOME_MODE = "soft"
+$env:LOONGSON_AOI_X_MAX_MM = "135"
+$env:LOONGSON_AOI_Y_MAX_MM = "135"
+$env:LOONGSON_AOI_Z_MAX_MM = "135"
+```
+
+If limit switches are added later, configure the three limit offsets in this
+branch first, then expose the same environment variables to the UI server.
+
 ## Branch Relationship
 
 - `hardware-sm`: this TB6600/XYZ slide-table driver
