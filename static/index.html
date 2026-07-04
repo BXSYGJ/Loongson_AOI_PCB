@@ -3,12 +3,64 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>单板PCB焊点智能缺陷检测系统</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260616-6" />
+    <title>单板 PCB 智能缺陷检测系统</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260704-sim-original-1" />
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="side-rail" aria-label="System navigation">
+    <main class="mode-screen" id="modeScreen">
+      <section class="mode-hero">
+        <div>
+          <span class="system-mark">Loongson AOI</span>
+          <h1>单板 PCB 智能缺陷检测系统</h1>
+          <p>选择当前接入条件，控制台会切换到对应的拍照、检测和滑台联动流程。</p>
+        </div>
+        <div class="mode-status">
+          <span class="status-dot" id="modeWsDot"></span>
+          <span id="modeWsText">WebSocket 离线</span>
+        </div>
+      </section>
+
+      <section class="mode-grid" aria-label="选择运行模式">
+        <button class="mode-card" data-mode="handheld">
+          <span class="mode-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 7h14v10H5zM9 7l1.4-2h3.2L15 7M8 20h8M12 10.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z" /></svg>
+          </span>
+          <strong>手持检测</strong>
+          <span>不接滑台，手持 OV9281 移动观察 PCB，右侧视频实时显示 YOLO 标注结果。</span>
+          <em>相机 + 实时 YOLO</em>
+        </button>
+
+        <button class="mode-card" data-mode="simulation">
+          <span class="mode-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M6 17l4-4 3 3 2-2 3 3" /></svg>
+          </span>
+          <strong>模拟模式</strong>
+          <span>导入已有 PCB 图片，按蛇形网格裁剪并模拟滑台检测。</span>
+          <em>图片 + YOLO</em>
+        </button>
+
+        <button class="mode-card" data-mode="real">
+          <span class="mode-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 17h16M6 14h12M8 11h8M10 8h4M5 20h14M7 17v3M17 17v3M12 4v4" /></svg>
+          </span>
+          <strong>真实模式</strong>
+          <span>真实滑台、真实 PCB、真实相机，完整走停拍照检测。</span>
+          <em>滑台 + 相机 + YOLO</em>
+        </button>
+
+        <button class="mode-card" data-mode="video">
+          <span class="mode-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4zM7 9h4M7 12h7M7 15h3M16 9l3 3-3 3M3 20h18M6 4v2M18 4v2" /></svg>
+          </span>
+          <strong>视频检测</strong>
+          <span>滑台连续蛇形扫描，PCB 画板同步移动检测区域，视频实时显示 YOLO 标注。</span>
+          <em>连续滑台 + 实时 YOLO</em>
+        </button>
+      </section>
+    </main>
+
+    <div class="app-shell is-hidden" id="appShell">
+      <aside class="side-rail" aria-label="系统导航">
         <div class="brand-mark">AOI</div>
         <button class="rail-btn active" data-target="controlPanel" title="检测控制" aria-label="检测控制">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v4H4zM4 15h16v4H4zM8 3v8M16 13v8" /></svg>
@@ -24,12 +76,18 @@
       <main class="workbench">
         <header class="topbar">
           <div>
-            <h1>单板PCB焊点智能缺陷检测系统</h1>
-            <p>Loongson 2K1000LA · FastAPI Web Console</p>
+            <div class="title-line">
+              <h1>单板 PCB 智能缺陷检测系统</h1>
+              <span class="mode-badge" id="activeModeBadge">未选择模式</span>
+            </div>
+            <p id="modeDescription">等待选择运行模式</p>
           </div>
           <div class="top-status">
             <span class="status-dot" id="wsDot"></span>
             <span id="wsText">WebSocket 离线</span>
+            <button class="icon-btn" id="backToModesBtn" title="返回模式选择" aria-label="返回模式选择">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6M9 12h11" /></svg>
+            </button>
             <button class="icon-btn" id="pingBtn" title="Ping" aria-label="Ping">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19v2M12 3v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
             </button>
@@ -41,16 +99,33 @@
           <section class="scan-panel" id="scanPanel">
             <div class="section-head">
               <div>
-                <h2>PCB 动态网格画布</h2>
+                <h2>PCB 检测示意图</h2>
                 <p id="gridMeta">FOV 30mm x 30mm · 等待参数</p>
               </div>
               <div class="coord-readout">
-                <span>XY坐标</span>
+                <span>XY 坐标</span>
                 <strong id="xyReadout">0.0, 0.0</strong>
               </div>
             </div>
-            <div class="canvas-wrap">
-              <canvas id="scanCanvas" width="980" height="640"></canvas>
+            <div class="inspection-stage">
+              <div class="canvas-wrap">
+                <canvas id="scanCanvas" width="980" height="640"></canvas>
+              </div>
+              <aside class="preview-panel">
+                <div class="panel-title-row">
+                  <h2 id="previewTitle">实时视频</h2>
+                  <button class="mini-btn" id="reloadCameraBtn">刷新</button>
+                </div>
+                <div class="camera-preview">
+                  <img id="cameraPreview" alt="OV9281 camera preview" />
+                  <div id="cameraPreviewStatus">等待相机流</div>
+                </div>
+                <div class="preview-meta">
+                  <span>采集源</span>
+                  <strong id="previewSourceText">OV9281 后端配置</strong>
+                  <select id="simulationSourceSelect" class="source-select is-hidden" aria-label="选择模拟 Source 图片"></select>
+                </div>
+              </aside>
             </div>
           </section>
 
@@ -75,14 +150,7 @@
                   <input id="originY" type="number" min="0" step="1" value="0" />
                 </label>
               </div>
-              <label>
-                <span>当前网格抓拍路径</span>
-                <input id="imagePath" type="text" value="algorithm/outputs/camera/latest.jpg" />
-              </label>
-              <label class="switch-line">
-                <input id="mockMode" type="checkbox" checked />
-                <span>Mock联调模式（未接滑台/相机时使用）</span>
-              </label>
+              <input id="imagePath" type="hidden" value="algorithm/outputs/camera/latest.jpg" />
               <div class="metrics">
                 <div><span>Rows</span><strong id="rowsValue">-</strong></div>
                 <div><span>Cols</span><strong id="colsValue">-</strong></div>
@@ -90,8 +158,47 @@
               </div>
             </section>
 
+            <section class="panel-section mode-only" id="simulationPanel" data-visible-mode="simulation">
+              <h2>模拟图片</h2>
+              <label>
+                <span>PCB 图片文件</span>
+                <input id="simulationImageFile" type="file" accept="image/*" multiple />
+              </label>
+              <button class="secondary-btn" id="uploadSimulationBtn">导入图片</button>
+              <p class="inline-note" id="simulationUploadStatus">尚未导入图片</p>
+              <div class="original-pcb-panel">
+                <div class="panel-title-row">
+                  <h3>原 PCB 图</h3>
+                  <span id="originalPcbName">未选择 Source</span>
+                </div>
+                <div class="original-pcb-preview">
+                  <img id="originalPcbPreview" alt="模拟模式原 PCB 图" />
+                  <div id="originalPcbStatus">导入图片后显示完整原图</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel-section mode-only is-hidden" id="videoPanel" data-visible-mode="video">
+              <h2>视频检测参数</h2>
+              <label>
+                <span>连续速度 mm/s</span>
+                <input id="videoSpeed" type="number" min="0.1" step="0.1" value="2.0" />
+              </label>
+              <div class="two-col">
+                <label>
+                  <span>YOLO FPS</span>
+                  <input id="videoInferenceFps" type="number" min="0.2" step="0.5" value="5" />
+                </label>
+                <label>
+                  <span>行间重叠 %</span>
+                  <input id="videoOverlap" type="number" min="0" max="80" step="5" value="20" />
+                </label>
+              </div>
+              <p class="inline-note">默认扫描完整软件行程；启动前请手动移动到物理原点并三轴回零。</p>
+            </section>
+
             <section class="panel-section">
-              <h2>Z轴对焦</h2>
+              <h2>Z 轴对焦</h2>
               <div class="jog-row">
                 <button class="tool-btn" id="zUpBtn">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 11l6-6 6 6" /></svg>
@@ -106,12 +213,13 @@
                 <span>点动距离 mm</span>
                 <input id="zDist" type="number" min="0.01" step="0.01" value="0.10" />
               </label>
-              <p class="lock-note">自动盲扫启动后 Z 轴锁死。</p>
+              <p class="inline-note" id="motionModeNote">当前模式不会实际移动滑台。</p>
             </section>
 
             <section class="panel-section command-section">
               <button class="secondary-btn" id="homeBtn">三轴回零</button>
-              <button class="primary-btn" id="startBtn">自动盲扫</button>
+              <button class="primary-btn" id="startBtn">开始检测</button>
+              <p class="command-hint" id="commandHint">等待运行条件检查</p>
             </section>
 
             <section class="panel-section">
@@ -121,14 +229,13 @@
               </div>
               <div class="status-list">
                 <div><span>滑台驱动</span><strong id="motorStatus">未知</strong></div>
-                <div><span>抓拍图片</span><strong id="captureStatus">未知</strong></div>
-                <div><span>YOLO权重</span><strong id="weightsStatus">未知</strong></div>
-                <div><span>检测脚本</span><strong id="scriptStatus">未知</strong></div>
+                <div><span>相机</span><strong id="captureStatus">未知</strong></div>
+                <div><span>YOLO 权重</span><strong id="weightsStatus">未知</strong></div>
+                <div><span>检测配置</span><strong id="scriptStatus">未知</strong></div>
               </div>
               <div class="lan-box">
                 <span>局域网访问地址</span>
                 <div id="lanUrls" class="lan-url-list">等待网络状态...</div>
-                <p>手机需连接同一 Wi-Fi/网线网络；若打不开，请放行 TCP 8000。</p>
               </div>
             </section>
 
@@ -137,7 +244,7 @@
               <div class="progress-track"><span id="progressBar"></span></div>
               <div class="state-grid">
                 <div><span>阶段</span><strong id="phaseValue">Idle</strong></div>
-                <div><span>50ms消抖</span><strong id="debounceValue">Ready</strong></div>
+                <div><span>消抖</span><strong id="debounceValue">Ready</strong></div>
               </div>
             </section>
           </aside>
@@ -147,7 +254,7 @@
           <section class="event-panel">
             <div class="section-head compact">
               <h2>工艺事件流</h2>
-              <span>move_to_xy -> 50ms消抖 -> YOLO -> result.json -> WebSocket</span>
+              <span id="eventFlowText">move_xy → debounce → capture_frame → detect_inference → result</span>
             </div>
             <ol id="eventLog"></ol>
           </section>
@@ -163,6 +270,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260616-6"></script>
+    <script src="/static/app.js?v=20260704-sim-original-1"></script>
   </body>
 </html>

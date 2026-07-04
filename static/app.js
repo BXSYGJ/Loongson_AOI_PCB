@@ -1,26 +1,122 @@
+const MODE_META = {
+  handheld: {
+    label: "手持检测",
+    description: "不接滑台，手持 OV9281 实时移动观察 PCB，YOLO 实时标注。",
+    previewTitle: "实时检测视频",
+    previewSource: "OV9281 + YOLO 标注流",
+    motionNote: "手持模式不移动滑台，不要求三轴回零，也不进行 XY 坐标定位。",
+  },
+  simulation: {
+    label: "模拟模式",
+    description: "导入 PCB 图片，按网格裁剪视野并模拟滑台走停检测。",
+    previewTitle: "模拟图预览",
+    previewSource: "导入 PCB 图片",
+    motionNote: "当前模式不使用相机和滑台，会从导入图片中裁剪每个网格。",
+  },
+  real: {
+    label: "真实模式",
+    description: "真实滑台走停、OV9281 抓拍、YOLO 推理和结果回传。",
+    previewTitle: "实时视频",
+    previewSource: "OV9281 相机",
+    motionNote: "当前模式会调用滑台驱动，启动前请确认已完成软回原点。",
+  },
+  video: {
+    label: "视频检测",
+    description: "滑台连续蛇形扫描，OV9281 视频帧实时进入 YOLO 推理。",
+    previewTitle: "实时检测视频",
+    previewSource: "OV9281 + YOLO 标注流",
+    motionNote: "当前模式会连续移动滑台；请先手动到物理原点并执行三轴回零。",
+  },
+};
+
 const state = {
   ws: null,
   plan: null,
   currentCell: null,
   results: new Map(),
+  cellArtifacts: new Map(),
   scanning: false,
+  mode: null,
+  simulationImagePath: "",
+  simulationImages: [],
+  lastStatus: null,
+  backendRunning: false,
+  previewOverride: null,
+  videoPosition: null,
+  videoTrail: [],
 };
 
+function ensureModeCards() {
+  const grid = document.querySelector(".mode-grid");
+  if (!grid) return;
+  const handheldCard = grid.querySelector('[data-mode="virtual"], [data-mode="handheld"]');
+  if (!handheldCard) return;
+  handheldCard.dataset.mode = "handheld";
+  handheldCard.innerHTML = `
+    <span class="mode-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M5 7h14v10H5zM9 7l1.4-2h3.2L15 7M8 20h8M12 10.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z" /></svg>
+    </span>
+    <strong>手持检测</strong>
+    <span>不接滑台，手持 OV9281 移动观察 PCB，右侧视频实时显示 YOLO 标注结果。</span>
+    <em>相机 + 实时 YOLO</em>
+  `;
+}
+
+function ensureCommandHint() {
+  const commandSection = document.querySelector(".command-section");
+  if (!commandSection || document.getElementById("commandHint")) return;
+  const hint = document.createElement("p");
+  hint.className = "command-hint";
+  hint.id = "commandHint";
+  hint.textContent = "等待运行条件检查";
+  commandSection.appendChild(hint);
+}
+
+ensureModeCards();
+ensureCommandHint();
+
 const el = {
+  modeScreen: document.getElementById("modeScreen"),
+  appShell: document.getElementById("appShell"),
+  modeCards: document.querySelectorAll(".mode-card"),
+  modeWsDot: document.getElementById("modeWsDot"),
+  modeWsText: document.getElementById("modeWsText"),
   wsDot: document.getElementById("wsDot"),
   wsText: document.getElementById("wsText"),
   pingBtn: document.getElementById("pingBtn"),
   stopBtn: document.getElementById("stopBtn"),
   startBtn: document.getElementById("startBtn"),
+  commandHint: document.getElementById("commandHint"),
   homeBtn: document.getElementById("homeBtn"),
   zUpBtn: document.getElementById("zUpBtn"),
   zDownBtn: document.getElementById("zDownBtn"),
+  backToModesBtn: document.getElementById("backToModesBtn"),
+  activeModeBadge: document.getElementById("activeModeBadge"),
+  modeDescription: document.getElementById("modeDescription"),
+  motionModeNote: document.getElementById("motionModeNote"),
   pcbLength: document.getElementById("pcbLength"),
   pcbWidth: document.getElementById("pcbWidth"),
   originX: document.getElementById("originX"),
   originY: document.getElementById("originY"),
   imagePath: document.getElementById("imagePath"),
-  mockMode: document.getElementById("mockMode"),
+  simulationPanel: document.getElementById("simulationPanel"),
+  videoPanel: document.getElementById("videoPanel"),
+  videoSpeed: document.getElementById("videoSpeed"),
+  videoInferenceFps: document.getElementById("videoInferenceFps"),
+  videoOverlap: document.getElementById("videoOverlap"),
+  videoPanelNote: document.querySelector("#videoPanel .inline-note"),
+  simulationImageFile: document.getElementById("simulationImageFile"),
+  uploadSimulationBtn: document.getElementById("uploadSimulationBtn"),
+  simulationUploadStatus: document.getElementById("simulationUploadStatus"),
+  originalPcbPreview: document.getElementById("originalPcbPreview"),
+  originalPcbStatus: document.getElementById("originalPcbStatus"),
+  originalPcbName: document.getElementById("originalPcbName"),
+  cameraPreview: document.getElementById("cameraPreview"),
+  cameraPreviewStatus: document.getElementById("cameraPreviewStatus"),
+  previewTitle: document.getElementById("previewTitle"),
+  previewSourceText: document.getElementById("previewSourceText"),
+  simulationSourceSelect: document.getElementById("simulationSourceSelect"),
+  reloadCameraBtn: document.getElementById("reloadCameraBtn"),
   refreshStatusBtn: document.getElementById("refreshStatusBtn"),
   motorStatus: document.getElementById("motorStatus"),
   captureStatus: document.getElementById("captureStatus"),
@@ -39,6 +135,7 @@ const el = {
   eventLog: document.getElementById("eventLog"),
   defectList: document.getElementById("defectList"),
   defectCount: document.getElementById("defectCount"),
+  eventFlowText: document.getElementById("eventFlowText"),
   canvas: document.getElementById("scanCanvas"),
   railButtons: document.querySelectorAll(".rail-btn"),
 };
@@ -55,37 +152,57 @@ function requestId() {
   return `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function artifactUrl(path) {
+  if (!path) return "";
+  return `/api/artifact?path=${encodeURIComponent(path)}`;
+}
+
+function cellKey(row, col) {
+  return `${row}:${col}`;
+}
+
 function logEvent(text) {
   const item = document.createElement("li");
   item.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
   el.eventLog.prepend(item);
-  while (el.eventLog.children.length > 80) {
+  while (el.eventLog.children.length > 100) {
     el.eventLog.lastElementChild.remove();
   }
 }
 
-window.addEventListener("error", (event) => {
-  logEvent(`前端脚本错误: ${event.message}`);
-});
-
-window.addEventListener("unhandledrejection", (event) => {
-  const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
-  logEvent(`前端异步错误: ${reason}`);
-});
-
 function setWsOnline(online) {
-  el.wsDot.classList.toggle("online", online);
+  for (const dot of [el.wsDot, el.modeWsDot]) {
+    dot.classList.toggle("online", online);
+  }
   el.wsText.textContent = online ? "WebSocket 在线" : "WebSocket 离线";
+  el.modeWsText.textContent = online ? "WebSocket 在线" : "WebSocket 离线";
 }
 
 function send(type, payload = {}) {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
     logEvent("WebSocket 未连接，指令未发送");
+    setCommandHint("WebSocket 未连接，指令未发送", "bad");
     return false;
   }
-  logEvent(`发送指令: ${type}`);
+  logEvent(`发送指令 ${type}`);
   state.ws.send(JSON.stringify({ type, request_id: requestId(), payload }));
   return true;
+}
+
+function setCommandHint(message, tone = "neutral") {
+  if (!el.commandHint) return;
+  el.commandHint.textContent = message || "";
+  el.commandHint.classList.remove("is-good", "is-warn", "is-bad", "is-neutral");
+  el.commandHint.classList.add(`is-${tone}`);
 }
 
 function connectWs() {
@@ -101,6 +218,7 @@ function connectWs() {
   ws.addEventListener("close", () => {
     setWsOnline(false);
     state.scanning = false;
+    setScanButtons(false);
     logEvent("WebSocket closed, retrying");
     setTimeout(connectWs, 1400);
   });
@@ -116,7 +234,310 @@ function connectWs() {
   });
 }
 
+function chooseMode(mode) {
+  if (!MODE_META[mode]) return;
+  state.mode = mode;
+  document.body.dataset.mode = mode;
+  el.modeScreen.classList.add("is-hidden");
+  el.appShell.classList.remove("is-hidden");
+  updateModeUi();
+  resetScanUi();
+  updatePreviewSource();
+  refreshSystemStatus({ log: true }).then(() => previewGrid());
+}
+
+function returnToModeScreen() {
+  if (state.scanning) {
+    logEvent("扫描运行中，先停止后再切换模式");
+    return;
+  }
+  el.appShell.classList.add("is-hidden");
+  el.modeScreen.classList.remove("is-hidden");
+}
+
+function updateModeUi() {
+  const meta = MODE_META[state.mode] || MODE_META.handheld;
+  el.activeModeBadge.textContent = meta.label;
+  el.modeDescription.textContent = meta.description;
+  el.previewTitle.textContent = meta.previewTitle;
+  el.previewSourceText.textContent = meta.previewSource;
+  el.motionModeNote.textContent = meta.motionNote;
+
+  Array.prototype.forEach.call(el.modeCards, (card) => {
+    card.classList.toggle("selected", card.dataset.mode === state.mode);
+  });
+  el.simulationPanel.classList.toggle("is-hidden", state.mode !== "simulation");
+  if (el.simulationSourceSelect) {
+    el.simulationSourceSelect.classList.toggle("is-hidden", state.mode !== "simulation");
+  }
+  el.videoPanel.classList.toggle("is-hidden", !(state.mode === "video" || state.mode === "handheld"));
+  const videoMode = state.mode === "video";
+  const handheldMode = state.mode === "handheld";
+  for (const input of [el.pcbLength, el.pcbWidth, el.originX, el.originY]) {
+    input.disabled = videoMode || handheldMode;
+  }
+  if (el.videoSpeed) el.videoSpeed.disabled = handheldMode;
+  if (el.videoOverlap) el.videoOverlap.disabled = handheldMode;
+  if (el.videoPanelNote) {
+    el.videoPanelNote.textContent = handheldMode
+      ? "手持检测只使用 YOLO FPS，不移动滑台；画板不提供 XY/FOV 坐标定位。"
+      : "默认扫描完整软件行程；启动前请手动移动到物理原点并三轴回零。";
+  }
+  el.eventFlowText.textContent = handheldMode
+    ? "camera_frame → detect_inference → handheld_detection"
+    : videoMode
+      ? "continuous_move → video_position → detect_inference → video_detection"
+      : "move_xy → debounce → capture_frame → detect_inference → result";
+  if (!state.scanning) {
+    el.startBtn.textContent = handheldMode ? "开始手持检测" : videoMode ? "开始视频检测" : "开始检测";
+  }
+  setPhysicalControlsEnabled((state.mode === "real" || state.mode === "video") && !state.scanning);
+  setCommandHint(handheldMode ? "手持模式可直接启动，不要求滑台回零" : "等待运行条件检查", "neutral");
+}
+
+function setPhysicalControlsEnabled(enabled) {
+  el.homeBtn.disabled = !enabled;
+  el.zUpBtn.disabled = !enabled;
+  el.zDownBtn.disabled = !enabled;
+}
+
+function simulationImageLabel(item) {
+  if (!item) return "未选择 Source 图片";
+  const size = item.size_bytes ? ` · ${formatBytes(item.size_bytes)}` : "";
+  return `${item.name || item.path}${size}`;
+}
+
+function currentSimulationImage() {
+  return state.simulationImages.find((item) => item.path === state.simulationImagePath) || null;
+}
+
+function updateOriginalPcbPreview(item = currentSimulationImage()) {
+  if (!el.originalPcbPreview || !el.originalPcbStatus || !el.originalPcbName) return;
+  if (!item) {
+    el.originalPcbPreview.removeAttribute("src");
+    el.originalPcbName.textContent = "未选择 Source";
+    el.originalPcbStatus.textContent = "导入图片后显示完整原图";
+    return;
+  }
+
+  el.originalPcbName.textContent = item.name || item.path;
+  el.originalPcbStatus.textContent = `完整原图：${item.name || item.path}`;
+  el.originalPcbPreview.src = artifactUrl(item.path);
+}
+
+function renderSimulationSources() {
+  if (!el.simulationSourceSelect) return;
+  el.simulationSourceSelect.innerHTML = "";
+  if (!state.simulationImages.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "尚未导入 Source 图片";
+    el.simulationSourceSelect.append(option);
+    el.simulationSourceSelect.disabled = true;
+    return;
+  }
+
+  el.simulationSourceSelect.disabled = false;
+  for (const item of state.simulationImages) {
+    const option = document.createElement("option");
+    option.value = item.path;
+    option.textContent = simulationImageLabel(item);
+    el.simulationSourceSelect.append(option);
+  }
+  el.simulationSourceSelect.value = state.simulationImagePath || state.simulationImages[0].path;
+}
+
+function setSimulationSource(path, options = {}) {
+  const item = state.simulationImages.find((entry) => entry.path === path) || null;
+  if (!item) {
+    state.simulationImagePath = "";
+    el.imagePath.value = "";
+    renderSimulationSources();
+    updateOriginalPcbPreview(null);
+    updatePreviewSource();
+    return false;
+  }
+
+  state.simulationImagePath = item.path;
+  el.imagePath.value = item.path;
+  renderSimulationSources();
+  updateOriginalPcbPreview(item);
+  if (state.mode === "simulation") {
+    el.previewTitle.textContent = MODE_META.simulation.previewTitle;
+    el.previewSourceText.textContent = `Source: ${item.name || item.path}`;
+    el.cameraPreviewStatus.textContent = `已选择 ${item.name || item.path}`;
+    el.cameraPreview.src = artifactUrl(item.path);
+    if (options.log !== false) {
+      logEvent(`模拟 Source 已切换 ${item.path}`);
+    }
+  }
+  return true;
+}
+
+function updatePreviewSource() {
+  state.previewOverride = null;
+  if (state.mode === "simulation") {
+    el.reloadCameraBtn.textContent = "刷新";
+    el.previewTitle.textContent = MODE_META.simulation.previewTitle;
+    renderSimulationSources();
+    if (state.simulationImagePath) {
+      const item = currentSimulationImage();
+      el.previewSourceText.textContent = item ? `Source: ${item.name || item.path}` : MODE_META.simulation.previewSource;
+      el.cameraPreviewStatus.textContent = item ? `已选择 ${item.name || item.path}` : "已导入 PCB 图片";
+      el.cameraPreview.src = artifactUrl(state.simulationImagePath);
+      updateOriginalPcbPreview(item);
+    } else {
+      el.previewSourceText.textContent = MODE_META.simulation.previewSource;
+      el.cameraPreview.removeAttribute("src");
+      el.cameraPreviewStatus.textContent = "等待导入 PCB 图片";
+      updateOriginalPcbPreview(null);
+    }
+    return;
+  }
+  if (state.mode === "video" || state.mode === "handheld") {
+    startVideoPreview();
+    return;
+  }
+  startCameraPreview();
+}
+
+function startCameraPreview() {
+  state.previewOverride = null;
+  const meta = MODE_META[state.mode] || MODE_META.handheld;
+  el.previewTitle.textContent = meta.previewTitle;
+  el.previewSourceText.textContent = meta.previewSource;
+  el.reloadCameraBtn.textContent = "重连";
+  el.cameraPreviewStatus.textContent = "连接相机流...";
+  el.cameraPreview.src = `/api/camera/stream.mjpg?ts=${Date.now()}`;
+}
+
+function startVideoPreview() {
+  state.previewOverride = null;
+  const meta = MODE_META[state.mode] || MODE_META.video;
+  el.previewTitle.textContent = meta.previewTitle;
+  el.previewSourceText.textContent = meta.previewSource;
+  el.reloadCameraBtn.textContent = "重连";
+  el.cameraPreviewStatus.textContent = "等待视频检测流...";
+  el.cameraPreview.src = `/api/video/stream.mjpg?ts=${Date.now()}`;
+}
+
+async function uploadSimulationImages() {
+  const files = Array.from((el.simulationImageFile.files || []));
+  if (!files.length) {
+    el.simulationUploadStatus.textContent = "请先选择一张或多张 PCB 图片";
+    return;
+  }
+
+  el.uploadSimulationBtn.disabled = true;
+  const uploaded = [];
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      el.simulationUploadStatus.textContent = `正在导入 ${index + 1}/${files.length}：${file.name}`;
+      const response = await fetch(`/api/simulation/upload?filename=${encodeURIComponent(file.name)}`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.detail || payload.message || `upload failed: ${file.name}`);
+      }
+      uploaded.push(payload);
+      const existingIndex = state.simulationImages.findIndex((item) => item.path === payload.path);
+      const imageItem = {
+        name: payload.name || file.name,
+        path: payload.path,
+        size_bytes: payload.size_bytes,
+      };
+      if (existingIndex >= 0) {
+        state.simulationImages.splice(existingIndex, 1, imageItem);
+      } else {
+        state.simulationImages.push(imageItem);
+      }
+      logEvent(`模拟图片已导入 ${payload.path}`);
+    }
+
+    if (uploaded.length) {
+      setSimulationSource(uploaded[0].path, { log: false });
+      el.simulationUploadStatus.textContent = `已导入 ${uploaded.length} 张图片，可在 Source 区选择`;
+      updatePreviewSource();
+    }
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    el.simulationUploadStatus.textContent = `导入失败：${message}`;
+    logEvent(`模拟图片导入失败: ${message}`);
+  } finally {
+    el.uploadSimulationBtn.disabled = false;
+  }
+}
+
+function buildVideoPlanFromStatus(status) {
+  const motor = status && status.motor ? status.motor : {};
+  const axes = motor.axes || {};
+  const xMax = Number(axes.x && axes.x.max_mm ? axes.x.max_mm : 135);
+  const yMax = Number(axes.y && axes.y.max_mm ? axes.y.max_mm : 135);
+  const overlap = Math.max(0, Math.min(0.8, Number(el.videoOverlap.value || 20) / 100));
+  const linePitch = 30 * (1 - overlap);
+  const rowPositions = [];
+  for (let y = 0; y < yMax; y += linePitch) {
+    rowPositions.push(Number(y.toFixed(4)));
+  }
+  if (!rowPositions.length || Math.abs(rowPositions[rowPositions.length - 1] - yMax) > 0.001) {
+    rowPositions.push(Number(yMax.toFixed(4)));
+  }
+  const homed = {
+    x: Boolean(axes.x && axes.x.homed),
+    y: Boolean(axes.y && axes.y.homed),
+    z: Boolean(axes.z && axes.z.homed),
+  };
+  return {
+    scan_type: "continuous_video",
+    operation_mode: "video",
+    rows: rowPositions.length,
+    cols: 1,
+    total_cells: rowPositions.length,
+    row_positions_mm: rowPositions,
+    fov_mm: { width: 30, height: 30 },
+    travel_mm: { x_max: xMax, y_max: yMax },
+    origin_mm: { x: 0, y: 0 },
+    line_pitch_mm: Number(linePitch.toFixed(4)),
+    overlap,
+    speed_mm_s: Number(el.videoSpeed.value || 2),
+    inference_fps: Number(el.videoInferenceFps.value || 5),
+    preview_fps: 8,
+    homed,
+    requires_soft_home: !(homed.x && homed.y && homed.z),
+  };
+}
+
+function buildHandheldPlan() {
+  return {
+    scan_type: "handheld",
+    operation_mode: "handheld",
+    rows: "-",
+    cols: "-",
+    total_cells: "-",
+    coordinate_mode: "unmapped",
+  };
+}
+
 async function previewGrid() {
+  if (state.mode === "handheld") {
+    state.plan = buildHandheldPlan();
+    updatePlanUi();
+    drawCanvas();
+    return;
+  }
+
+  if (state.mode === "video") {
+    const status = state.lastStatus || await refreshSystemStatus();
+    state.plan = buildVideoPlanFromStatus(status);
+    updatePlanUi();
+    drawCanvas();
+    return;
+  }
+
   const params = new URLSearchParams({
     pcb_length_mm: el.pcbLength.value,
     pcb_width_mm: el.pcbWidth.value,
@@ -134,8 +555,9 @@ async function previewGrid() {
     updatePlanUi();
     drawCanvas();
   } catch (error) {
-    el.gridMeta.textContent = error.message;
-    logEvent(`网格预览失败: ${error.message}`);
+    const message = error && error.message ? error.message : String(error);
+    el.gridMeta.textContent = message;
+    logEvent(`网格预览失败: ${message}`);
   }
 }
 
@@ -146,6 +568,7 @@ async function refreshSystemStatus(options = {}) {
       throw new Error(`system status ${response.status}`);
     }
     const status = await response.json();
+    state.lastStatus = status;
     renderSystemStatus(status);
     if (options.log) {
       logEvent("系统状态已刷新");
@@ -153,10 +576,10 @@ async function refreshSystemStatus(options = {}) {
     return status;
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
-    el.motorStatus.textContent = "状态接口异常";
-    el.captureStatus.textContent = "状态接口异常";
-    el.weightsStatus.textContent = "状态接口异常";
-    el.scriptStatus.textContent = "状态接口异常";
+    setStatusText(el.motorStatus, "状态接口异常", "bad");
+    setStatusText(el.captureStatus, "状态接口异常", "bad");
+    setStatusText(el.weightsStatus, "状态接口异常", "bad");
+    setStatusText(el.scriptStatus, "状态接口异常", "bad");
     logEvent(`系统状态刷新失败: ${message}`);
     return null;
   }
@@ -167,14 +590,50 @@ function renderSystemStatus(status) {
   const camera = status.camera || {};
   const algorithm = status.algorithm || {};
   const network = status.network || {};
-  const capture = camera.capture_image || {};
+  const runtime = camera.runtime || {};
   const weights = algorithm.weights || {};
+  const config = algorithm.config || {};
   const script = algorithm.detect_script || {};
+  const scan = status.scan || {};
+  state.backendRunning = Boolean(scan.running);
 
-  setStatusText(el.motorStatus, motor.connected ? "已连接" : "Mock桩/未接入", motor.connected ? "ok" : "warn");
-  setStatusText(el.captureStatus, capture.exists ? `已落盘 ${formatBytes(capture.size_bytes)}` : "未找到 latest.jpg", capture.exists ? "ok" : "bad");
+  const motorText = motor.connected
+    ? "已连接"
+    : motor.driver_mode === "dry_run"
+      ? "Dry-run"
+      : "未连接";
+  setStatusText(el.motorStatus, motorText, motor.connected ? "ok" : "warn");
+
+  const cameraText = runtime.opened
+    ? `已打开 ${runtime.source || ""} ${runtime.width || "-"}x${runtime.height || "-"}`
+    : `不可用${runtime.last_error ? `：${runtime.last_error}` : ""}`;
+  setStatusText(el.captureStatus, cameraText, runtime.opened ? "ok" : "bad");
+  if (runtime.source && state.mode !== "simulation" && !state.previewOverride) {
+    const origin = runtime.source_origin ? ` · ${runtime.source_origin}` : "";
+    el.previewSourceText.textContent = `OV9281 ${runtime.source}${origin}`;
+  }
+
   setStatusText(el.weightsStatus, weights.exists ? `已找到 ${formatBytes(weights.size_bytes)}` : "未找到 best.pt", weights.exists ? "ok" : "bad");
-  setStatusText(el.scriptStatus, script.exists ? "已解析" : "未找到", script.exists ? "ok" : "bad");
+  setStatusText(el.scriptStatus, script.exists && config.exists ? "脚本/配置可解析" : "脚本或配置缺失", script.exists && config.exists ? "ok" : "bad");
+
+  if (state.backendRunning && !state.scanning) {
+    setCommandHint("已有检测任务运行，请先停止", "warn");
+  }
+  setScanButtons(state.scanning);
+
+  if (state.mode === "video" || state.mode === "handheld") {
+    const video = scan.video ? scan.video : {};
+    const label = state.mode === "handheld" ? "手持检测" : "视频检测";
+    el.cameraPreviewStatus.textContent = video.running
+      ? `${label} ${video.fps || 0} FPS · frame ${video.frame_id || 0}`
+      : `${label}流待启动`;
+  } else if (state.mode !== "simulation") {
+    if (runtime.opened) {
+      el.cameraPreviewStatus.textContent = `OV9281 ${runtime.width || "-"}x${runtime.height || "-"} 在线`;
+    } else if (runtime.last_error) {
+      el.cameraPreviewStatus.textContent = runtime.last_error;
+    }
+  }
   renderLanUrls(network.lan_urls || []);
 }
 
@@ -209,6 +668,23 @@ function formatBytes(bytes) {
 
 function updatePlanUi() {
   if (!state.plan) return;
+  if (state.plan.scan_type === "handheld") {
+    el.rowsValue.textContent = "-";
+    el.colsValue.textContent = "-";
+    el.tilesValue.textContent = "-";
+    el.gridMeta.textContent = "手持检测 · 无滑台坐标定位 · 缺陷位置以实时视频画面为准";
+    el.xyReadout.textContent = "无坐标";
+    return;
+  }
+  if (state.plan.scan_type === "continuous_video") {
+    el.rowsValue.textContent = state.plan.rows;
+    el.colsValue.textContent = "连续";
+    el.tilesValue.textContent = `${state.plan.row_positions_mm.length} 行`;
+    const travel = state.plan.travel_mm;
+    const overlap = Math.round((state.plan.overlap || 0) * 100);
+    el.gridMeta.textContent = `连续视频检测 · 行程 ${travel.x_max}mm x ${travel.y_max}mm · 行距 ${state.plan.line_pitch_mm}mm · 重叠 ${overlap}%`;
+    return;
+  }
   el.rowsValue.textContent = state.plan.rows;
   el.colsValue.textContent = state.plan.cols;
   el.tilesValue.textContent = state.plan.total_cells;
@@ -219,26 +695,51 @@ function updatePlanUi() {
 function resizeCanvasForDisplay() {
   const rect = el.canvas.getBoundingClientRect();
   const ratio = window.devicePixelRatio || 1;
-  const width = Math.max(320, Math.floor(rect.width * ratio));
-  const height = Math.max(260, Math.floor(rect.height * ratio));
+  const width = Math.max(360, Math.floor(rect.width * ratio));
+  const height = Math.max(280, Math.floor(rect.height * ratio));
   if (el.canvas.width !== width || el.canvas.height !== height) {
     el.canvas.width = width;
     el.canvas.height = height;
   }
-  return { width, height, ratio };
+  return { width, height };
 }
 
 function drawCanvas() {
   const { width, height } = resizeCanvasForDisplay();
   const ctx = el.canvas.getContext("2d");
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#08100f";
+  ctx.fillStyle = "#f8fafc";
   ctx.fillRect(0, 0, width, height);
 
+  ctx.strokeStyle = "#d9e2ec";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < width; x += 28) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < height; y += 28) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+
   if (!state.plan) {
-    ctx.fillStyle = "#8fa0aa";
+    ctx.fillStyle = "#667085";
     ctx.font = "24px Microsoft YaHei, Segoe UI, sans-serif";
-    ctx.fillText("等待 PCB 长宽参数", 36, 58);
+    ctx.fillText(state.mode === "handheld" ? "手持模式无坐标定位" : state.mode === "video" ? "等待滑台行程状态" : "等待 PCB 长宽参数", 36, 58);
+    return;
+  }
+
+  if (state.plan.scan_type === "handheld") {
+    drawHandheldCanvas(ctx, width, height);
+    return;
+  }
+
+  if (state.plan.scan_type === "continuous_video") {
+    drawVideoCanvas(ctx, width, height);
     return;
   }
 
@@ -249,10 +750,10 @@ function drawCanvas() {
   const gridW = tile * cols;
   const gridH = tile * rows;
   const ox = (width - gridW) / 2;
-  const oy = (height - gridH) / 2;
+  const oy = pad;
   const boundary = state.plan.logical_boundary;
 
-  ctx.fillStyle = "#10271f";
+  ctx.fillStyle = "#e8f3ef";
   ctx.fillRect(ox, oy, gridW, gridH);
 
   for (let row = 0; row < rows; row += 1) {
@@ -262,9 +763,14 @@ function drawCanvas() {
       const key = `${row}:${col}`;
       const cellDefects = state.results.get(key);
       const hasDefect = cellDefects && cellDefects.length > 0;
+      const hasImage = state.cellArtifacts.has(key);
       const isCurrent = state.currentCell && state.currentCell.row === row && state.currentCell.col === col;
 
-      ctx.fillStyle = hasDefect ? "rgba(255, 77, 87, 0.20)" : "rgba(32, 209, 125, 0.055)";
+      ctx.fillStyle = hasDefect
+        ? "rgba(209, 67, 67, 0.18)"
+        : hasImage
+          ? "rgba(33, 128, 87, 0.16)"
+          : "rgba(33, 128, 87, 0.08)";
       ctx.fillRect(x + 1, y + 1, tile - 2, tile - 2);
 
       if (col === cols - 1 && boundary.last_col_visible_ratio < 1) {
@@ -276,27 +782,160 @@ function drawCanvas() {
         drawClippedZone(ctx, x, y + visibleH, tile, tile - visibleH);
       }
 
-      ctx.strokeStyle = isCurrent ? "#ffb84d" : "rgba(42, 222, 145, 0.42)";
+      ctx.strokeStyle = isCurrent ? "#1769aa" : "#93a4b7";
       ctx.lineWidth = isCurrent ? 3 : 1;
       ctx.strokeRect(x + 0.5, y + 0.5, tile - 1, tile - 1);
 
-      ctx.fillStyle = "#8fa0aa";
+      ctx.fillStyle = "#475467";
       ctx.font = `${Math.max(10, Math.min(14, tile * 0.16))}px Segoe UI, sans-serif`;
       ctx.fillText(`${row},${col}`, x + 8, y + 18);
     }
   }
 
-  ctx.strokeStyle = "#47b8d8";
+  ctx.strokeStyle = "#1769aa";
   ctx.lineWidth = 2;
   ctx.strokeRect(ox, oy, gridW, gridH);
+}
+
+function drawHandheldCanvas(ctx, width, height) {
+  const pad = 42;
+  const boardW = width - pad * 2;
+  const boardH = height - pad * 2;
+  const ox = pad;
+  const oy = pad;
+
+  ctx.fillStyle = "#edf7f4";
+  ctx.fillRect(ox, oy, boardW, boardH);
+  ctx.strokeStyle = "#1769aa";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ox, oy, boardW, boardH);
+
+  ctx.strokeStyle = "rgba(23, 105, 170, 0.18)";
+  ctx.lineWidth = 1;
+  for (let x = ox + 40; x < ox + boardW; x += 40) {
+    ctx.beginPath();
+    ctx.moveTo(x, oy);
+    ctx.lineTo(x, oy + boardH);
+    ctx.stroke();
+  }
+  for (let y = oy + 40; y < oy + boardH; y += 40) {
+    ctx.beginPath();
+    ctx.moveTo(ox, y);
+    ctx.lineTo(ox + boardW, y);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#17202a";
+  ctx.font = "24px Microsoft YaHei, Segoe UI, sans-serif";
+  ctx.fillText("手持模式无坐标定位", ox + 28, oy + 58);
+  ctx.fillStyle = "#667085";
+  ctx.font = "15px Microsoft YaHei, Segoe UI, sans-serif";
+  ctx.fillText("请观察右侧实时标注视频；PCB 画板不显示滑台 FOV 位置。", ox + 28, oy + 92);
+
+  ctx.fillStyle = state.scanning ? "#218057" : "#8a97a8";
+  ctx.font = "13px Microsoft YaHei, Segoe UI, sans-serif";
+  ctx.fillText(state.scanning ? "实时推理中" : "等待开始手持检测", ox + 28, oy + 126);
+}
+
+function videoCanvasMetrics(width, height) {
+  const pad = 42;
+  const travel = state.plan.travel_mm;
+  const fov = state.plan.fov_mm;
+  const logicalW = travel.x_max + fov.width;
+  const logicalH = travel.y_max + fov.height;
+  const scale = Math.min((width - pad * 2) / logicalW, (height - pad * 2) / logicalH);
+  const boardW = travel.x_max * scale;
+  const boardH = travel.y_max * scale;
+  const ox = (width - boardW) / 2;
+  const oy = (height - boardH) / 2;
+  return { scale, ox, oy, boardW, boardH };
+}
+
+function drawVideoCanvas(ctx, width, height) {
+  const metrics = videoCanvasMetrics(width, height);
+  const { scale, ox, oy, boardW, boardH } = metrics;
+  const travel = state.plan.travel_mm;
+  const fov = state.plan.fov_mm;
+
+  ctx.fillStyle = "#eaf3f8";
+  ctx.fillRect(ox, oy, boardW, boardH);
+  ctx.strokeStyle = "#1769aa";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ox, oy, boardW, boardH);
+
+  ctx.fillStyle = "#475467";
+  ctx.font = "13px Microsoft YaHei, Segoe UI, sans-serif";
+  ctx.fillText(`软件行程 ${travel.x_max}mm x ${travel.y_max}mm`, ox, Math.max(22, oy - 12));
+
+  ctx.strokeStyle = "rgba(23, 105, 170, 0.35)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([8, 8]);
+  for (const y of state.plan.row_positions_mm || []) {
+    const py = oy + y * scale;
+    ctx.beginPath();
+    ctx.moveTo(ox, py);
+    ctx.lineTo(ox + boardW, py);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  if (state.videoTrail.length > 1) {
+    ctx.strokeStyle = "rgba(33, 128, 87, 0.85)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    state.videoTrail.forEach((point, index) => {
+      const px = ox + point.x_mm * scale;
+      const py = oy + point.y_mm * scale;
+      if (index === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+  }
+
+  const position = state.videoPosition || { x_mm: 0, y_mm: 0, area_mm: { x: 0, y: 0, width: fov.width, height: fov.height } };
+  const rectX = ox + position.area_mm.x * scale;
+  const rectY = oy + position.area_mm.y * scale;
+  const rectW = position.area_mm.width * scale;
+  const rectH = position.area_mm.height * scale;
+
+  ctx.fillStyle = "rgba(23, 105, 170, 0.16)";
+  ctx.fillRect(rectX, rectY, rectW, rectH);
+  ctx.strokeStyle = "#c43c3c";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(rectX, rectY, rectW, rectH);
+
+  if (position.area_mm.clipped_right_mm || position.area_mm.clipped_bottom_mm) {
+    ctx.fillStyle = "rgba(183, 121, 31, 0.18)";
+    ctx.fillRect(
+      Math.max(rectX, ox + boardW),
+      rectY,
+      Math.max(0, rectX + rectW - (ox + boardW)),
+      rectH,
+    );
+  }
+
+  const segment = position.segment || {};
+  const lineText = segment.row !== undefined && segment.row !== null ? `row ${segment.row}` : "ready";
+  const label = `FOV ${position.x_mm.toFixed(1)}, ${position.y_mm.toFixed(1)} · ${lineText}`;
+  ctx.font = "13px Microsoft YaHei, Segoe UI, sans-serif";
+  const labelW = ctx.measureText(label).width + 14;
+  const labelX = rectX + 7;
+  const labelY = rectY + 21;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.88)";
+  ctx.fillRect(labelX - 5, labelY - 15, labelW, 20);
+  ctx.strokeStyle = "rgba(185, 199, 214, 0.9)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(labelX - 5, labelY - 15, labelW, 20);
+  ctx.fillStyle = "#17202a";
+  ctx.fillText(label, labelX, labelY);
 }
 
 function drawClippedZone(ctx, x, y, w, h) {
   if (w <= 0 || h <= 0) return;
   ctx.save();
-  ctx.fillStyle = "rgba(255, 184, 77, 0.16)";
+  ctx.fillStyle = "rgba(224, 148, 26, 0.18)";
   ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = "rgba(255, 184, 77, 0.55)";
+  ctx.strokeStyle = "rgba(224, 148, 26, 0.65)";
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let i = -h; i < w; i += 10) {
@@ -307,9 +946,18 @@ function drawClippedZone(ctx, x, y, w, h) {
   ctx.restore();
 }
 
+function decorateDefects(defects, payload) {
+  return (defects || []).map((defect) => Object.assign({}, defect, {
+    raw_image: payload.raw_image,
+    annotated_image: payload.annotated_image,
+    capture_ms: payload.capture_ms,
+    inference_ms: payload.inference_ms,
+  }));
+}
+
 function renderDefects(defects, row, col) {
   if (defects.length) {
-    state.results.set(`${row}:${col}`, defects);
+    state.results.set(cellKey(row, col), defects);
   }
   const all = [];
   state.results.forEach((items, cell) => {
@@ -322,28 +970,93 @@ function renderDefects(defects, row, col) {
 
   if (!all.length) {
     const empty = document.createElement("div");
-    empty.className = "defect-item";
-    empty.innerHTML = `<div class="thumb"></div><div><strong>暂无缺陷</strong><br><span>等待 result.json 回传</span></div><span>OK</span>`;
+    empty.className = "defect-item empty";
+    empty.innerHTML = `<div class="thumb"></div><div><strong>暂无缺陷</strong><br><span>等待检测结果回传</span></div><span>OK</span>`;
     el.defectList.append(empty);
     return;
   }
 
-  for (const defect of all.slice(-30).reverse()) {
+  for (const defect of all.slice(-40).reverse()) {
     const item = document.createElement("div");
     item.className = "defect-item";
+    const image = defect.annotated_image ? artifactUrl(defect.annotated_image) : "";
+    const timing = defect.inference_ms ? ` · ${Math.round(defect.inference_ms)}ms` : "";
     item.innerHTML = `
-      <div class="thumb"></div>
-      <div><strong>${defect.label || defect.type || "unknown"}</strong><br><span>cell ${defect.cell} · bbox ${JSON.stringify(defect.bbox || [])}</span></div>
+      <div class="thumb"${image ? ` style="background-image:url('${image}')"` : ""}></div>
+      <div><strong>${escapeHtml(defect.label || defect.type || "unknown")}</strong><br><span>cell ${escapeHtml(defect.cell)} · bbox ${escapeHtml(JSON.stringify(defect.bbox || []))}${timing}</span></div>
       <span>${Math.round((defect.confidence || 0) * 100)}%</span>
     `;
     el.defectList.append(item);
   }
 }
 
+function rememberCellArtifact(payload) {
+  if (payload.row === undefined || payload.col === undefined) return;
+  state.cellArtifacts.set(
+    cellKey(payload.row, payload.col),
+    {
+      row: payload.row,
+      col: payload.col,
+      raw_image: payload.raw_image,
+      annotated_image: payload.annotated_image,
+      result_json: payload.result_json,
+      defects: payload.defects || [],
+      capture_ms: payload.capture_ms,
+      inference_ms: payload.inference_ms,
+    },
+  );
+}
+
+function showPreviewImage(row, col, imagePath, sourceText, setOverride = true) {
+  if (!imagePath) return false;
+  if (setOverride) {
+    state.previewOverride = { row, col, imagePath };
+  }
+  el.previewTitle.textContent = `区域 ${row},${col}`;
+  el.previewSourceText.textContent = sourceText;
+  el.cameraPreviewStatus.textContent = `正在加载区域 ${row},${col}`;
+  el.cameraPreview.src = artifactUrl(imagePath);
+  return true;
+}
+
+function showCellArtifact(row, col) {
+  const artifact = state.cellArtifacts.get(cellKey(row, col));
+  if (!artifact) {
+    el.cameraPreviewStatus.textContent = state.scanning
+      ? `区域 ${row},${col} 尚未完成检测`
+      : `区域 ${row},${col} 暂无检测图片`;
+    return;
+  }
+
+  const imagePath = artifact.annotated_image || artifact.raw_image;
+  if (!imagePath) {
+    el.cameraPreviewStatus.textContent = `区域 ${row},${col} 没有图片路径`;
+    return;
+  }
+
+  showPreviewImage(row, col, imagePath, artifact.annotated_image ? "检测标注图" : "原始图");
+}
+
 function updateProgress(progress) {
   if (!progress) return;
   const ratio = progress.total ? (progress.done / progress.total) * 100 : 0;
   el.progressBar.style.width = `${Math.max(0, Math.min(100, ratio))}%`;
+}
+
+function resetScanUi() {
+  state.currentCell = null;
+  state.videoPosition = null;
+  state.videoTrail = [];
+  state.results.clear();
+  state.cellArtifacts.clear();
+  state.previewOverride = null;
+  el.defectList.innerHTML = "";
+  el.defectCount.textContent = "0 items";
+  el.progressBar.style.width = "0%";
+  el.phaseValue.textContent = "Idle";
+  el.debounceValue.textContent = "Ready";
+  renderDefects([], 0, 0);
+  drawCanvas();
 }
 
 function handlePacket(packet) {
@@ -355,9 +1068,10 @@ function handlePacket(packet) {
     case "grid_plan":
       state.plan = payload;
       state.results.clear();
+      state.cellArtifacts.clear();
       updatePlanUi();
       drawCanvas();
-      logEvent(`grid_plan Rows=${payload.rows} Cols=${payload.cols}`);
+      logEvent(`grid_plan rows=${payload.rows} cols=${payload.cols}`);
       break;
     case "scan_phase":
       el.phaseValue.textContent = payload.phase || "-";
@@ -369,84 +1083,312 @@ function handlePacket(packet) {
         state.currentCell = { row: payload.row, col: payload.col };
         drawCanvas();
       }
-      const rowText = payload.row !== undefined && payload.row !== null ? payload.row : "-";
-      const colText = payload.col !== undefined && payload.col !== null ? payload.col : "-";
-      logEvent(`${payload.phase} row=${rowText} col=${colText}`);
+      if (payload.phase === "detect_inference" && payload.raw_image && payload.row !== undefined) {
+        showPreviewImage(payload.row, payload.col, payload.raw_image, "当前原图");
+      }
+      logPhase(payload);
       break;
     case "scan_result":
       state.currentCell = { row: payload.row, col: payload.col };
+      rememberCellArtifact(payload);
       updateProgress(payload.progress);
-      renderDefects(payload.defects || [], payload.row, payload.col);
+      renderDefects(decorateDefects(payload.defects || [], payload), payload.row, payload.col);
       drawCanvas();
-      logEvent(`result.json parsed row=${payload.row} col=${payload.col} defects=${(payload.defects || []).length}`);
+      showCellArtifact(payload.row, payload.col);
+      logEvent(`result row=${payload.row} col=${payload.col} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
       break;
     case "scan_error":
       if (!payload.request_id || payload.error) {
         state.scanning = false;
+        state.backendRunning = false;
         setScanButtons(false);
       }
       el.phaseValue.textContent = "Error";
+      setCommandHint(payload.message || payload.error || "检测启动失败", "bad");
       logEvent(`ERROR: ${payload.message || payload.error || "scan_error"}`);
       break;
     case "scan_complete":
       state.scanning = false;
+      state.backendRunning = false;
       setScanButtons(false);
       updateProgress(payload.progress);
       el.phaseValue.textContent = "Complete";
-      logEvent("scan_complete");
+      setCommandHint("检测完成", "good");
+      logEvent(`scan_complete · return_origin=${payload.return_motion || "done"}`);
       break;
     case "scan_stopped":
       state.scanning = false;
+      state.backendRunning = false;
       setScanButtons(false);
       updateProgress(payload.progress);
       el.phaseValue.textContent = "Stopped";
+      setCommandHint("检测已停止", "neutral");
       logEvent(payload.message || "scan_stopped");
+      break;
+    case "video_plan":
+      state.plan = payload;
+      state.results.clear();
+      state.cellArtifacts.clear();
+      state.videoTrail = [];
+      updatePlanUi();
+      drawCanvas();
+      logEvent(`video_plan rows=${payload.rows} speed=${payload.speed_mm_s}mm/s`);
+      break;
+    case "video_phase":
+      el.phaseValue.textContent = payload.phase || "-";
+      el.debounceValue.textContent = payload.phase === "continuous_move" ? `${payload.speed_mm_s || "-"}mm/s` : "Video";
+      logVideoPhase(payload);
+      break;
+    case "video_position":
+      state.videoPosition = payload;
+      state.videoTrail.push({ x_mm: payload.x_mm || 0, y_mm: payload.y_mm || 0 });
+      if (state.videoTrail.length > 220) state.videoTrail.shift();
+      el.xyReadout.textContent = `${Number(payload.x_mm || 0).toFixed(1)}, ${Number(payload.y_mm || 0).toFixed(1)}`;
+      updateProgress(payload.progress);
+      cameraPreviewVideoStatus(payload);
+      drawCanvas();
+      break;
+    case "video_detection":
+      rememberVideoDetections(payload);
+      renderDefects([], 0, 0);
+      el.cameraPreviewStatus.textContent = `YOLO ${payload.fps || 0} FPS · frame ${payload.frame_id || 0} · ${Math.round(payload.inference_ms || 0)}ms`;
+      logEvent(`video_detection frame=${payload.frame_id} defects=${(payload.defects || []).length} fps=${payload.fps || "-"}`);
+      break;
+    case "video_error":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      el.phaseValue.textContent = "Video Error";
+      setCommandHint(payload.message || payload.error || "视频检测启动失败", "bad");
+      logEvent(`VIDEO ERROR: ${payload.message || payload.error || "video_error"}`);
+      break;
+    case "video_complete":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      el.phaseValue.textContent = "Video Complete";
+      el.progressBar.style.width = "100%";
+      setCommandHint("视频检测完成", "good");
+      logEvent(payload.message || "video_complete");
+      break;
+    case "video_stopped":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      el.phaseValue.textContent = "Video Stopped";
+      setCommandHint("视频检测已停止", "neutral");
+      logEvent(payload.message || "video_stopped");
+      break;
+    case "handheld_phase":
+      el.phaseValue.textContent = payload.phase || "-";
+      el.debounceValue.textContent = "Handheld";
+      setCommandHint(payload.message || "手持检测运行中", "good");
+      logEvent(`handheld_${payload.phase || "phase"}`);
+      break;
+    case "handheld_detection":
+      rememberVideoDetections(payload);
+      renderDefects([], 0, 0);
+      drawCanvas();
+      el.cameraPreviewStatus.textContent = `手持 YOLO ${payload.fps || 0} FPS · frame ${payload.frame_id || 0} · ${Math.round(payload.inference_ms || 0)}ms`;
+      logEvent(`handheld_detection frame=${payload.frame_id} defects=${(payload.defects || []).length} fps=${payload.fps || "-"}`);
+      break;
+    case "handheld_error":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      el.phaseValue.textContent = "Handheld Error";
+      setCommandHint(payload.message || payload.error || "手持检测启动失败", "bad");
+      logEvent(`HANDHELD ERROR: ${payload.message || payload.error || "handheld_error"}`);
+      break;
+    case "handheld_stopped":
+      state.scanning = false;
+      state.backendRunning = false;
+      setScanButtons(false);
+      el.phaseValue.textContent = "Handheld Stopped";
+      setCommandHint("手持检测已停止", "neutral");
+      logEvent(payload.message || "handheld_stopped");
       break;
     default:
       logEvent(`packet ${packet.type}`);
   }
 }
 
+function logPhase(payload) {
+  const rowText = payload.row !== undefined && payload.row !== null ? payload.row : "-";
+  const colText = payload.col !== undefined && payload.col !== null ? payload.col : "-";
+  const motion = payload.motion ? ` ${payload.motion}` : "";
+  const source = payload.source ? ` ${payload.source}` : "";
+  const timing = payload.capture_ms ? ` capture=${Math.round(payload.capture_ms)}ms` : "";
+  logEvent(`${payload.phase} row=${rowText} col=${colText}${motion}${source}${timing}`);
+}
+
+function logVideoPhase(payload) {
+  const rowText = payload.row !== undefined && payload.row !== null ? ` row=${payload.row}` : "";
+  const target = payload.target_x_mm !== undefined ? ` target_x=${Number(payload.target_x_mm).toFixed(1)}` : "";
+  const yText = payload.y_mm !== undefined ? ` y=${Number(payload.y_mm).toFixed(1)}` : "";
+  logEvent(`${payload.phase}${rowText}${target}${yText}`);
+}
+
+function cameraPreviewVideoStatus(payload) {
+  const segment = payload.segment || {};
+  if (segment.type === "raster_line") {
+    el.cameraPreviewStatus.textContent = `连续扫描 row ${segment.row} · X=${Number(payload.x_mm || 0).toFixed(1)} Y=${Number(payload.y_mm || 0).toFixed(1)}`;
+  }
+}
+
+function rememberVideoDetections(payload) {
+  const defects = decorateDefects(payload.defects || [], payload);
+  if (!defects.length) return;
+  state.results.set(`frame:${payload.frame_id}`, defects.map((defect) => Object.assign({}, defect, {
+    frame_id: payload.frame_id,
+    x_mm: payload.x_mm,
+    y_mm: payload.y_mm,
+  })));
+  while (state.results.size > 80) {
+    const firstKey = state.results.keys().next().value;
+    state.results.delete(firstKey);
+  }
+}
+
 function setScanButtons(scanning) {
-  el.startBtn.disabled = scanning;
-  el.startBtn.textContent = scanning ? "盲扫中" : "自动盲扫";
-  el.stopBtn.classList.toggle("armed", scanning);
+  state.scanning = scanning;
+  const busy = scanning || state.backendRunning;
+  const videoMode = state.mode === "video";
+  const handheldMode = state.mode === "handheld";
+  const idleText = handheldMode ? "开始手持检测" : videoMode ? "开始视频检测" : "开始检测";
+  const busyText = handheldMode ? "手持检测中" : videoMode ? "视频检测中" : "检测中";
+  el.startBtn.disabled = busy;
+  el.startBtn.textContent = busy ? busyText : idleText;
+  el.stopBtn.classList.toggle("armed", busy);
+  setPhysicalControlsEnabled((state.mode === "real" || state.mode === "video") && !busy);
+}
+
+function modePreflight(status) {
+  if (!state.mode) {
+    return { ok: false, message: "请先选择运行模式" };
+  }
+  const algorithm = status && status.algorithm ? status.algorithm : {};
+  const camera = status && status.camera ? status.camera : {};
+  const motor = status && status.motor ? status.motor : {};
+  const scan = status && status.scan ? status.scan : {};
+  const cameraReady = camera.runtime && camera.runtime.opened;
+  const weightsReady = algorithm.weights && algorithm.weights.exists;
+  const scriptReady = algorithm.detect_script && algorithm.detect_script.exists;
+  const configReady = algorithm.config && algorithm.config.exists;
+
+  if (scan.running && !state.scanning) {
+    return { ok: false, message: "已有检测任务运行，请先停止" };
+  }
+  if (!weightsReady || !scriptReady || !configReady) {
+    return { ok: false, message: "YOLO 权重、检测脚本或类别配置未就绪" };
+  }
+  if ((state.mode === "handheld" || state.mode === "real" || state.mode === "video") && !cameraReady) {
+    return { ok: false, message: "相机未打开，无法进入相机抓拍流程" };
+  }
+  if (state.mode === "simulation" && !state.simulationImagePath) {
+    return { ok: false, message: "请先导入一张 PCB 图片" };
+  }
+  if (state.mode === "video") {
+    const axes = motor.axes || {};
+    const homed = Boolean(axes.x && axes.x.homed && axes.y && axes.y.homed && axes.z && axes.z.homed);
+    if (!homed) {
+      return { ok: false, message: "视频检测需要先手动移动到物理原点并执行三轴回零" };
+    }
+  }
+  if (state.mode === "real" && !motor.connected) {
+    logEvent("真实模式提示：当前滑台状态不是 connected，请确认驱动配置或 dry-run 环境。");
+  }
+  return { ok: true };
 }
 
 async function startScan() {
   const status = await refreshSystemStatus({ log: true });
-  if (!el.mockMode.checked && status) {
-    const captureReady = status.camera && status.camera.capture_image && status.camera.capture_image.exists;
-    const weightsReady = status.algorithm && status.algorithm.weights && status.algorithm.weights.exists;
-    const scriptReady = status.algorithm && status.algorithm.detect_script && status.algorithm.detect_script.exists;
-    if (!captureReady || !weightsReady || !scriptReady) {
-      logEvent("真实模式未启动：抓拍图片、YOLO权重或检测脚本未就绪。");
-      el.phaseValue.textContent = "Preflight";
-      return;
-    }
+  const preflight = modePreflight(status);
+  if (!preflight.ok) {
+    el.phaseValue.textContent = "Preflight";
+    setCommandHint(preflight.message, "bad");
+    logEvent(`启动被拦截：${preflight.message}`);
+    return;
   }
 
-  state.scanning = true;
   setScanButtons(true);
+  setCommandHint("启动指令已发送，等待后端确认", "good");
   state.results.clear();
+  state.cellArtifacts.clear();
+  state.videoTrail = [];
+  state.videoPosition = null;
   el.defectList.innerHTML = "";
   el.progressBar.style.width = "0%";
+
+  if (state.mode === "handheld") {
+    state.plan = buildHandheldPlan();
+    updatePlanUi();
+    drawCanvas();
+    updatePreviewSource();
+    const sent = send("start_handheld_detection", {
+      inference_fps: Number(el.videoInferenceFps.value || 5),
+      preview_fps: 12,
+    });
+    if (!sent) {
+      state.backendRunning = false;
+      setScanButtons(false);
+    }
+    return;
+  }
+
+  if (state.mode === "video") {
+    updatePreviewSource();
+    const sent = send("start_video_scan", {
+      speed_mm_s: Number(el.videoSpeed.value || 2),
+      inference_fps: Number(el.videoInferenceFps.value || 5),
+      preview_fps: 8,
+      overlap: Number(el.videoOverlap.value || 20) / 100,
+    });
+    if (!sent) {
+      state.backendRunning = false;
+      setScanButtons(false);
+    }
+    return;
+  }
+
+  const imagePath = state.mode === "simulation" ? state.simulationImagePath : el.imagePath.value.trim();
   const sent = send("start_scan", {
+    operation_mode: state.mode,
+    capture_mode: "real",
     pcb_length_mm: Number(el.pcbLength.value),
     pcb_width_mm: Number(el.pcbWidth.value),
     origin_x_mm: Number(el.originX.value),
     origin_y_mm: Number(el.originY.value),
-    image_path: el.imagePath.value.trim(),
-    capture_mode: el.mockMode.checked ? "mock" : "real",
+    image_path: imagePath,
   });
   if (!sent) {
-    state.scanning = false;
+    state.backendRunning = false;
     setScanButtons(false);
   }
 }
 
 function selectCellFromCanvas(event) {
   if (!state.plan) return;
+  if (state.plan.scan_type === "handheld") {
+    el.xyReadout.textContent = "无坐标";
+    setCommandHint("手持模式无滑台坐标定位，请观察右侧实时视频", "neutral");
+    logEvent("手持模式画板无 XY/FOV 坐标定位");
+    return;
+  }
+  if (state.plan.scan_type === "continuous_video") {
+    const rect = el.canvas.getBoundingClientRect();
+    const ratioX = el.canvas.width / rect.width;
+    const ratioY = el.canvas.height / rect.height;
+    const px = (event.clientX - rect.left) * ratioX;
+    const py = (event.clientY - rect.top) * ratioY;
+    const metrics = videoCanvasMetrics(el.canvas.width, el.canvas.height);
+    if (px < metrics.ox || py < metrics.oy || px > metrics.ox + metrics.boardW || py > metrics.oy + metrics.boardH) return;
+    const x = (px - metrics.ox) / metrics.scale;
+    const y = (py - metrics.oy) / metrics.scale;
+    el.xyReadout.textContent = `${x.toFixed(1)}, ${y.toFixed(1)}`;
+    logEvent(`查看行程坐标 X=${x.toFixed(1)} Y=${y.toFixed(1)}`);
+    return;
+  }
   const rect = el.canvas.getBoundingClientRect();
   const ratioX = el.canvas.width / rect.width;
   const ratioY = el.canvas.height / rect.height;
@@ -459,7 +1401,7 @@ function selectCellFromCanvas(event) {
   const gridW = tile * cols;
   const gridH = tile * rows;
   const ox = (el.canvas.width - gridW) / 2;
-  const oy = (el.canvas.height - gridH) / 2;
+  const oy = pad;
   if (px < ox || py < oy || px > ox + gridW || py > oy + gridH) return;
   const col = Math.min(cols - 1, Math.max(0, Math.floor((px - ox) / tile)));
   const row = Math.min(rows - 1, Math.max(0, Math.floor((py - oy) / tile)));
@@ -467,6 +1409,7 @@ function selectCellFromCanvas(event) {
   const x = state.plan.origin_mm.x + col * state.plan.fov_mm.width;
   const y = state.plan.origin_mm.y + row * state.plan.fov_mm.height;
   el.xyReadout.textContent = `${x.toFixed(1)}, ${y.toFixed(1)}`;
+  showCellArtifact(row, col);
   logEvent(`选中网格 row=${row} col=${col}`);
   drawCanvas();
 }
@@ -483,8 +1426,16 @@ function navigateToPanel(button) {
   target.classList.add("panel-focus");
   window.setTimeout(() => target.classList.remove("panel-focus"), 1200);
   target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-  logEvent(`导航到: ${button.getAttribute("title")}`);
 }
+
+window.addEventListener("error", (event) => {
+  logEvent(`前端脚本错误: ${event.message}`);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
+  logEvent(`前端异步错误: ${reason}`);
+});
 
 for (const input of [el.pcbLength, el.pcbWidth, el.originX, el.originY]) {
   input.addEventListener("change", previewGrid);
@@ -494,9 +1445,72 @@ for (const input of [el.pcbLength, el.pcbWidth, el.originX, el.originY]) {
   });
 }
 
+for (const input of [el.videoSpeed, el.videoInferenceFps, el.videoOverlap]) {
+  input.addEventListener("change", previewGrid);
+  input.addEventListener("input", () => window.clearTimeout(input._timer));
+  input.addEventListener("input", () => {
+    input._timer = window.setTimeout(previewGrid, 220);
+  });
+}
+
+Array.prototype.forEach.call(el.modeCards, (card) => {
+  card.addEventListener("click", () => chooseMode(card.dataset.mode));
+});
+
+el.backToModesBtn.addEventListener("click", returnToModeScreen);
 el.pingBtn.addEventListener("click", () => send("ping"));
 el.stopBtn.addEventListener("click", () => send("stop_scan"));
 el.refreshStatusBtn.addEventListener("click", () => refreshSystemStatus({ log: true }));
+el.reloadCameraBtn.addEventListener("click", () => {
+  updatePreviewSource();
+  refreshSystemStatus({ log: true });
+});
+el.uploadSimulationBtn.addEventListener("click", uploadSimulationImages);
+el.simulationImageFile.addEventListener("change", () => {
+  const files = Array.from(el.simulationImageFile.files || []);
+  el.simulationUploadStatus.textContent = files.length
+    ? `已选择 ${files.length} 张图片`
+    : "尚未导入图片";
+});
+if (el.simulationSourceSelect) {
+  el.simulationSourceSelect.addEventListener("change", () => {
+    setSimulationSource(el.simulationSourceSelect.value);
+  });
+}
+if (el.originalPcbPreview) {
+  el.originalPcbPreview.addEventListener("load", () => {
+    const item = currentSimulationImage();
+    if (item && el.originalPcbStatus) {
+      el.originalPcbStatus.textContent = `完整原图已加载：${item.name || item.path}`;
+    }
+  });
+  el.originalPcbPreview.addEventListener("error", () => {
+    if (el.originalPcbStatus) {
+      el.originalPcbStatus.textContent = "原 PCB 图加载失败";
+    }
+  });
+}
+el.cameraPreview.addEventListener("load", () => {
+  if (state.previewOverride) {
+    el.cameraPreviewStatus.textContent = `区域 ${state.previewOverride.row},${state.previewOverride.col} 图片已加载`;
+    return;
+  }
+  if (state.mode === "simulation") {
+    const item = currentSimulationImage();
+    el.cameraPreviewStatus.textContent = item ? `模拟图已加载：${item.name || item.path}` : "等待导入 PCB 图片";
+  } else if (state.mode === "video" || state.mode === "handheld") {
+    el.cameraPreviewStatus.textContent = state.mode === "handheld" ? "手持检测流已连接" : "视频检测流已连接";
+  } else {
+    el.cameraPreviewStatus.textContent = "相机流已连接";
+  }
+});
+el.cameraPreview.addEventListener("error", () => {
+  el.cameraPreviewStatus.textContent = state.mode === "simulation"
+    ? "模拟图加载失败"
+    : state.mode === "video" || state.mode === "handheld"
+      ? "实时检测流等待启动或连接失败"
+      : "相机流连接失败";
+});
 el.homeBtn.addEventListener("click", () => send("home_all_axes"));
 el.startBtn.addEventListener("click", startScan);
 el.zUpBtn.addEventListener("click", () => send("z_jog", { direction: "up", dist: Number(el.zDist.value) }));
@@ -508,6 +1522,5 @@ Array.prototype.forEach.call(el.railButtons, (button) => {
 window.addEventListener("resize", drawCanvas);
 
 connectWs();
-previewGrid();
 refreshSystemStatus();
 renderDefects([], 0, 0);
