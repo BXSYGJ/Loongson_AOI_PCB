@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>手机拍照上传 · Loongson AOI</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --line: #d9e2ec;
+      --text: #17202a;
+      --muted: #667085;
+      --blue: #1769aa;
+      --green: #218057;
+      --red: #b42318;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    }
+
+    main {
+      width: min(720px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    header {
+      margin: 8px 0 18px;
+    }
+
+    .brand {
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin: 8px 0 8px;
+      font-size: clamp(24px, 8vw, 34px);
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 12px 28px rgba(23, 32, 42, 0.06);
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      margin: 16px 0;
+      color: #344054;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    input[type="file"] {
+      width: 100%;
+      padding: 14px;
+      border: 1px dashed #9fb3c8;
+      border-radius: 8px;
+      background: #f8fafc;
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    button {
+      width: 100%;
+      min-height: 46px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--blue);
+      color: #ffffff;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+
+    .status {
+      margin-top: 12px;
+      min-height: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .status.ok {
+      color: var(--green);
+    }
+
+    .status.bad {
+      color: var(--red);
+    }
+
+    .picker-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 16px 0 10px;
+    }
+
+    .picker-btn.secondary {
+      border: 1px solid #b9c7d6;
+      background: #ffffff;
+      color: var(--blue);
+    }
+
+    .hidden-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .preview {
+      margin-top: 16px;
+      display: none;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #eef3f8;
+    }
+
+    .preview img {
+      display: block;
+      width: 100%;
+      max-height: 56vh;
+      object-fit: contain;
+      background: #ffffff;
+    }
+
+    .recent {
+      margin-top: 18px;
+    }
+
+    .worker {
+      margin: 14px 0;
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .worker strong {
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    .recent h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    .upload-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .upload-list li {
+      display: grid;
+      gap: 2px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      font-size: 14px;
+    }
+
+    .upload-list span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .nav {
+      margin-top: 16px;
+      display: inline-flex;
+      color: var(--blue);
+      font-size: 14px;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand">Loongson AOI</div>
+      <h1>手机拍照上传</h1>
+      <p>拍照或选择 PCB 图片后上传到电脑/龙芯教育派。检测由电脑端第五模块人工选择后启动。</p>
+    </header>
+
+    <section class="panel">
+      <div class="worker">
+        <strong>手机推理节点</strong>
+        <span id="workerStatus">正在连接推理通道...</span>
+      </div>
+      <div class="picker-actions">
+        <button class="picker-btn" id="takePhotoBtn" type="button">拍照</button>
+        <button class="picker-btn secondary" id="chooseGalleryBtn" type="button">从图库选择</button>
+      </div>
+      <input id="cameraInput" class="hidden-input" type="file" accept="image/*" capture="environment" />
+      <input id="galleryInput" class="hidden-input" type="file" accept="image/*" />
+      <button id="uploadBtn" type="button">上传照片</button>
+      <div id="status" class="status">等待拍照或选择图片</div>
+      <div id="preview" class="preview">
+        <img id="previewImage" alt="已选择照片预览" />
+      </div>
+    </section>
+
+    <section class="recent">
+      <h2>最近上传</h2>
+      <ul id="uploadList" class="upload-list">
+        <li>正在读取上传列表...</li>
+      </ul>
+    </section>
+
+    <a class="nav" href="/">返回完整 AOI 网站</a>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script>
+    const cameraInput = document.getElementById("cameraInput");
+    const galleryInput = document.getElementById("galleryInput");
+    const takePhotoBtn = document.getElementById("takePhotoBtn");
+    const chooseGalleryBtn = document.getElementById("chooseGalleryBtn");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const statusNode = document.getElementById("status");
+    const preview = document.getElementById("preview");
+    const previewImage = document.getElementById("previewImage");
+    const uploadList = document.getElementById("uploadList");
+    const workerStatus = document.getElementById("workerStatus");
+    let selectedFile = null;
+    let workerSocket = null;
+    let inferenceRuntime = null;
+    let inferenceSession = null;
+    let inferenceInputName = "";
+    let inferenceOutputName = "";
+
+    function setStatus(text, tone = "") {
+      statusNode.textContent = text;
+      statusNode.classList.remove("ok", "bad");
+      if (tone) statusNode.classList.add(tone);
+    }
+
+    function setWorkerStatus(text) {
+      workerStatus.textContent = text;
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) return "-";
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    function artifactUrl(path) {
+      return `/api/artifact?path=${encodeURIComponent(path)}`;
+    }
+
+    function imageStem(filename) {
+      const dot = filename.lastIndexOf(".");
+      return dot > 0 ? filename.slice(0, dot) : filename || "phone-pcb";
+    }
+
+    function loadImageElement(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => {
+          URL.revokeObjectURL(url);
+          resolve(image);
+        };
+        image.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error("图片无法在浏览器端解码"));
+        };
+        image.src = url;
+      });
+    }
+
+    function canvasToBlob(canvas, type, quality) {
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => resolve(blob), type, quality);
+      });
+    }
+
+    function convertCanvasToGrayscale(ctx, width, height) {
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+      for (let index = 0; index < data.length; index += 4) {
+        const gray = Math.round(data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114);
+        data[index] = gray;
+        data[index + 1] = gray;
+        data[index + 2] = gray;
+      }
+      ctx.putImageData(imageData, 0, 0);
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function nmsDetections(detections, iouThreshold = 0.45) {
+      const grouped = new Map();
+      for (const detection of detections) {
+        const key = detection.type || "";
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(detection);
+      }
+      const kept = [];
+      for (const items of grouped.values()) {
+        items.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+        const classKept = [];
+        for (const item of items) {
+          if (classKept.every((existing) => bboxIou(item.bbox, existing.bbox) < iouThreshold)) {
+            classKept.push(item);
+          }
+        }
+        kept.push(...classKept);
+      }
+      return kept.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+    }
+
+    function bboxIou(a, b) {
+      const ix1 = Math.max(a[0], b[0]);
+      const iy1 = Math.max(a[1], b[1]);
+      const ix2 = Math.min(a[2], b[2]);
+      const iy2 = Math.min(a[3], b[3]);
+      const iw = Math.max(0, ix2 - ix1);
+      const ih = Math.max(0, iy2 - iy1);
+      const inter = iw * ih;
+      if (inter <= 0) return 0;
+      const areaA = Math.max(0, a[2] - a[0]) * Math.max(0, a[3] - a[1]);
+      const areaB = Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+      const union = areaA + areaB - inter;
+      return union ? inter / union : 0;
+    }
+
+    async function loadRuntime() {
+      if (inferenceRuntime && inferenceSession) return inferenceRuntime;
+      if (!window.ort) {
+        throw new Error("onnxruntime-web 未加载，请确认手机可以访问 CDN 或连接互联网");
+      }
+      const response = await fetch("/api/phone-inference/runtime");
+      if (!response.ok) throw new Error(`runtime ${response.status}`);
+      inferenceRuntime = await response.json();
+      const modelUrl = `${inferenceRuntime.model_url}?ts=${Date.now()}`;
+      try {
+        inferenceSession = await ort.InferenceSession.create(modelUrl, { executionProviders: ["webgpu", "wasm"] });
+      } catch (error) {
+        inferenceSession = await ort.InferenceSession.create(modelUrl, { executionProviders: ["wasm"] });
+      }
+      inferenceInputName = inferenceSession.inputNames[0];
+      inferenceOutputName = inferenceSession.outputNames[0];
+      return inferenceRuntime;
+    }
+
+    async function imageFromUrl(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`image ${response.status}`);
+      const blob = await response.blob();
+      return loadImageElement(new File([blob], "inference.jpg", { type: blob.type || "image/jpeg" }));
+    }
+
+    function preprocessImage(image, imgsz) {
+      const sourceWidth = image.naturalWidth || image.width;
+      const sourceHeight = image.naturalHeight || image.height;
+      const scale = Math.min(imgsz / Math.max(sourceWidth, 1), imgsz / Math.max(sourceHeight, 1));
+      const resizedWidth = Math.max(1, Math.round(sourceWidth * scale));
+      const resizedHeight = Math.max(1, Math.round(sourceHeight * scale));
+      const padX = Math.round((imgsz - resizedWidth) / 2);
+      const padY = Math.round((imgsz - resizedHeight) / 2);
+      const canvas = document.createElement("canvas");
+      canvas.width = imgsz;
+      canvas.height = imgsz;
+      const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      ctx.fillStyle = "rgb(114,114,114)";
+      ctx.fillRect(0, 0, imgsz, imgsz);
+      ctx.drawImage(image, padX, padY, resizedWidth, resizedHeight);
+      const pixels = ctx.getImageData(0, 0, imgsz, imgsz).data;
+      const data = new Float32Array(3 * imgsz * imgsz);
+      const plane = imgsz * imgsz;
+      for (let index = 0, pixel = 0; index < pixels.length; index += 4, pixel += 1) {
+        data[pixel] = pixels[index] / 255;
+        data[plane + pixel] = pixels[index + 1] / 255;
+        data[plane * 2 + pixel] = pixels[index + 2] / 255;
+      }
+      return {
+        tensor: new ort.Tensor("float32", data, [1, 3, imgsz, imgsz]),
+        sourceWidth,
+        sourceHeight,
+        scale,
+        padX,
+        padY,
+      };
+    }
+
+    function decodeYoloOutput(output, meta, runtime) {
+      const names = runtime.names || {};
+      const cnNames = runtime.cn_names || {};
+      const classCount = Object.keys(names).length;
+      const dims = output.dims || [];
+      const values = output.data;
+      const rows = [];
+      if (dims.length === 3 && dims[1] === classCount + 4) {
+        const count = dims[2];
+        for (let i = 0; i < count; i += 1) {
+          const row = [];
+          for (let j = 0; j < classCount + 4; j += 1) row.push(values[j * count + i]);
+          rows.push(row);
+        }
+      } else if (dims.length === 3 && dims[2] === classCount + 4) {
+        const count = dims[1];
+        for (let i = 0; i < count; i += 1) {
+          const row = [];
+          for (let j = 0; j < classCount + 4; j += 1) row.push(values[i * (classCount + 4) + j]);
+          rows.push(row);
+        }
+      } else {
+        throw new Error(`不支持的 ONNX 输出形状: ${dims.join("x")}`);
+      }
+      const detections = [];
+      for (const row of rows) {
+        let classId = 0;
+        let confidence = -Infinity;
+        for (let i = 0; i < classCount; i += 1) {
+          if (row[4 + i] > confidence) {
+            confidence = row[4 + i];
+            classId = i;
+          }
+        }
+        if (confidence < Number(runtime.conf || 0.5)) continue;
+        const cx = row[0];
+        const cy = row[1];
+        const w = row[2];
+        const h = row[3];
+        const x1 = clamp(Math.round((cx - w / 2 - meta.padX) / meta.scale), 0, meta.sourceWidth - 1);
+        const y1 = clamp(Math.round((cy - h / 2 - meta.padY) / meta.scale), 0, meta.sourceHeight - 1);
+        const x2 = clamp(Math.round((cx + w / 2 - meta.padX) / meta.scale), x1 + 1, meta.sourceWidth);
+        const y2 = clamp(Math.round((cy + h / 2 - meta.padY) / meta.scale), y1 + 1, meta.sourceHeight);
+        const type = names[String(classId)] || String(classId);
+        detections.push({
+          type,
+          label: cnNames[type] || type,
+          bbox: [x1, y1, x2, y2],
+          confidence: Math.round(confidence * 10000) / 10000,
+        });
+      }
+      return nmsDetections(detections);
+    }
+
+    function normalizeUniqueInts(values, fallback) {
+      const source = Array.isArray(values) && values.length ? values : fallback;
+      const result = [];
+      for (const value of source) {
+        const normalized = Math.max(32, Number.parseInt(value, 10) || 0);
+        if (normalized && !result.includes(normalized)) result.push(normalized);
+      }
+      return result.length ? result : fallback;
+    }
+
+    function tileStarts(total, tile, stride) {
+      if (total <= tile) return [0];
+      const starts = [];
+      for (let value = 0; value < Math.max(1, total - tile + 1); value += Math.max(1, stride)) {
+        starts.push(value);
+      }
+      const finalStart = total - tile;
+      if (starts[starts.length - 1] !== finalStart) starts.push(finalStart);
+      return starts;
+    }
+
+    function cropImage(image, x, y, width, height) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      ctx.drawImage(image, x, y, width, height, 0, 0, width, height);
+      return canvas;
+    }
+
+    function profileKey(profile) {
+      return `${Number(profile.tile_size || 0)}@${Number(profile.imgsz || 0)}`;
+    }
+
+    function sourceProfile(profile) {
+      return {
+        tile_size: Number(profile.tile_size || 0),
+        imgsz: Number(profile.imgsz || 0),
+        tile_stride: Number(profile.tile_stride || 0),
+      };
+    }
+
+    function fuseProfileDetections(profileResults, rules = {}) {
+      const iouThreshold = Number(rules.iou_threshold ?? 0.45);
+      const confirmConf = Number(rules.confirm_conf ?? 0.5);
+      const multiConfirmConf = Number(rules.multi_confirm_conf ?? 0.35);
+      const suspectedConf = Number(rules.suspected_conf ?? 0.2);
+      const multiSuspectedConf = Number(rules.multi_suspected_conf ?? 0.1);
+      const candidates = [];
+
+      for (const profile of profileResults) {
+        const profileInfo = sourceProfile(profile);
+        const key = profileKey(profile);
+        for (const detection of profile.detections || []) {
+          candidates.push({ ...detection, _profile: profileInfo, _profile_key: key });
+        }
+      }
+
+      const clusters = [];
+      candidates.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+      for (const candidate of candidates) {
+        const bbox = candidate.bbox || [0, 0, 0, 0];
+        const type = String(candidate.type || "");
+        let bestCluster = null;
+        let bestIou = 0;
+        for (const cluster of clusters) {
+          if (String(cluster.type) !== type) continue;
+          const iou = bboxIou(bbox, cluster.bbox);
+          if (iou >= iouThreshold && iou > bestIou) {
+            bestIou = iou;
+            bestCluster = cluster;
+          }
+        }
+        if (!bestCluster) {
+          clusters.push({ type, bbox, items: [candidate] });
+        } else {
+          bestCluster.items.push(candidate);
+        }
+      }
+
+      const confirmed = [];
+      const suspected = [];
+      const discarded = [];
+      for (const cluster of clusters) {
+        const items = cluster.items.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+        const best = items[0];
+        const profileMap = new Map();
+        for (const item of items) profileMap.set(String(item._profile_key), { ...item._profile });
+        const confidences = items.map((item) => Number(item.confidence || 0));
+        const maxConfidence = Math.max(...confidences, 0);
+        const meanConfidence = confidences.length
+          ? confidences.reduce((total, value) => total + value, 0) / confidences.length
+          : 0;
+        const supportCount = profileMap.size;
+        const evidenceScore = Math.min(0.99, maxConfidence + 0.05 * Math.max(0, supportCount - 1));
+        let decision = "discarded";
+        if (maxConfidence >= confirmConf || (supportCount >= 2 && maxConfidence >= multiConfirmConf)) {
+          decision = "confirmed";
+        } else if (maxConfidence >= suspectedConf || (supportCount >= 2 && maxConfidence >= multiSuspectedConf)) {
+          decision = "suspected";
+        }
+        const fused = {
+          type: best.type,
+          label: best.label || best.type,
+          bbox: (best.bbox || [0, 0, 0, 0]).map((value) => Number.parseInt(value, 10) || 0),
+          confidence: Math.round(evidenceScore * 10000) / 10000,
+          max_confidence: Math.round(maxConfidence * 10000) / 10000,
+          mean_confidence: Math.round(meanConfidence * 10000) / 10000,
+          support_count: supportCount,
+          decision,
+          source_profiles: Array.from(profileMap.values()),
+          source_tile: best.source_tile,
+        };
+        if (decision === "confirmed") confirmed.push(fused);
+        else if (decision === "suspected") suspected.push(fused);
+        else discarded.push(fused);
+      }
+
+      confirmed.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+      suspected.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+      discarded.sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+      return {
+        detections: [...confirmed, ...suspected],
+        confirmed_defects: confirmed,
+        suspected_defects: suspected,
+        discarded_defects: discarded,
+        fusion_rules: {
+          iou_threshold: iouThreshold,
+          confirm_conf: confirmConf,
+          multi_confirm_conf: multiConfirmConf,
+          suspected_conf: suspectedConf,
+          multi_suspected_conf: multiSuspectedConf,
+        },
+      };
+    }
+
+    async function inferImage(image, runtime, imgsz) {
+      const meta = preprocessImage(image, Number(imgsz || runtime.imgsz || 640));
+      const feeds = {};
+      feeds[inferenceInputName] = meta.tensor;
+      const outputs = await inferenceSession.run(feeds);
+      const output = outputs[inferenceOutputName] || Object.values(outputs)[0];
+      return decodeYoloOutput(output, meta, runtime);
+    }
+
+    async function runSingleInferenceJob(payload, runtime, image, started) {
+      const defects = await inferImage(image, runtime, Number(runtime.imgsz || 640));
+      return {
+        ok: true,
+        job_id: payload.job_id,
+        defects,
+        inference_ms: Math.round((performance.now() - started) * 100) / 100,
+        inference_location: "phone_browser",
+        runtime: {
+          backend: runtime.backend,
+          imgsz: runtime.imgsz,
+          execution_provider: "onnxruntime-web",
+        },
+      };
+    }
+
+    async function runTiledInferenceJob(payload, runtime, image, started) {
+      const request = payload.detection_request || {};
+      const sourceWidth = image.naturalWidth || image.width;
+      const sourceHeight = image.naturalHeight || image.height;
+      const tileSizes = normalizeUniqueInts(request.tile_sizes, [Number(runtime.imgsz || 640)]);
+      const imgszs = normalizeUniqueInts(request.imgszs, [Number(runtime.imgsz || 640)]);
+      const requestedImgszs = normalizeUniqueInts(request.requested_imgszs, imgszs);
+      const skippedImgszs = Array.isArray(request.skipped_imgszs)
+        ? request.skipped_imgszs.map((value) => Number.parseInt(value, 10)).filter(Boolean)
+        : requestedImgszs.filter((value) => !imgszs.includes(value));
+      const overlap = Math.max(0, Math.min(0.9, Number(request.overlap ?? 0.5)));
+      const profileResults = [];
+      const tileStrides = {};
+
+      for (const tileSize of tileSizes) {
+        const stride = Math.max(1, Math.round(tileSize * (1 - overlap)));
+        tileStrides[String(tileSize)] = stride;
+        const xs = tileStarts(sourceWidth, tileSize, stride);
+        const ys = tileStarts(sourceHeight, tileSize, stride);
+        for (const imgsz of imgszs) {
+          const rawDetections = [];
+          let tileCount = 0;
+          let profileError = null;
+          try {
+            for (const y of ys) {
+              for (const x of xs) {
+                const width = Math.min(sourceWidth, x + tileSize) - x;
+                const height = Math.min(sourceHeight, y + tileSize) - y;
+                if (width <= 0 || height <= 0) continue;
+                tileCount += 1;
+                const crop = cropImage(image, x, y, width, height);
+                const tileDetections = await inferImage(crop, runtime, imgsz);
+                for (const detection of tileDetections) {
+                  const bbox = detection.bbox || [0, 0, 0, 0];
+                  const globalBbox = [
+                    clamp(Number.parseInt(x + bbox[0], 10), 0, sourceWidth),
+                    clamp(Number.parseInt(y + bbox[1], 10), 0, sourceHeight),
+                    clamp(Number.parseInt(x + bbox[2], 10), 0, sourceWidth),
+                    clamp(Number.parseInt(y + bbox[3], 10), 0, sourceHeight),
+                  ];
+                  if (globalBbox[2] <= globalBbox[0] || globalBbox[3] <= globalBbox[1]) continue;
+                  rawDetections.push({
+                    ...detection,
+                    bbox: globalBbox,
+                    source_tile: {
+                      x,
+                      y,
+                      width,
+                      height,
+                      tile_size: tileSize,
+                      imgsz,
+                    },
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            rawDetections.length = 0;
+            profileError = error.message || String(error);
+          }
+          const profileDetections = nmsDetections(rawDetections);
+          const bestConfidence = profileDetections.reduce(
+            (best, item) => Math.max(best, Number(item.confidence || 0)),
+            0,
+          );
+          const profile = {
+            tile_size: tileSize,
+            imgsz,
+            tile_stride: stride,
+            tile_count: tileCount,
+            raw_detection_count: rawDetections.length,
+            nms_detection_count: profileDetections.length,
+            best_confidence: Math.round(bestConfidence * 10000) / 10000,
+            detections: profileDetections,
+          };
+          if (profileError) profile.error = profileError;
+          profileResults.push(profile);
+        }
+      }
+
+      const selectedProfile = profileResults.reduce((best, item) => {
+        if (!best) return item;
+        const currentKey = [Number(item.best_confidence || 0), Number(item.nms_detection_count || 0)];
+        const bestKey = [Number(best.best_confidence || 0), Number(best.nms_detection_count || 0)];
+        return currentKey[0] > bestKey[0] || (currentKey[0] === bestKey[0] && currentKey[1] > bestKey[1])
+          ? item
+          : best;
+      }, null) || {
+        tile_size: tileSizes[0],
+        imgsz: imgszs[0],
+        tile_stride: tileStrides[String(tileSizes[0])] || tileSizes[0],
+        tile_count: 0,
+        raw_detection_count: 0,
+        nms_detection_count: 0,
+        best_confidence: 0,
+        detections: [],
+      };
+      const fusion = fuseProfileDetections(profileResults, request.fusion_rules || {});
+      const defects = fusion.detections;
+      const strategy = profileResults.length > 1 ? "profile_ensemble" : "tiled";
+      const profile_summaries = profileResults.map((profile) => ({
+        tile_size: Number(profile.tile_size),
+        imgsz: Number(profile.imgsz),
+        tile_stride: Number(profile.tile_stride),
+        tile_count: Number(profile.tile_count),
+        raw_detection_count: Number(profile.raw_detection_count),
+        nms_detection_count: Number(profile.nms_detection_count),
+        best_confidence: Number(profile.best_confidence || 0),
+        error: profile.error || null,
+      }));
+      const detection_details = {
+        strategy,
+        selection_metric: "multi_profile_evidence",
+        selected_profile: {
+          tile_size: Number(selectedProfile.tile_size),
+          imgsz: Number(selectedProfile.imgsz),
+          tile_stride: Number(selectedProfile.tile_stride),
+          tile_count: Number(selectedProfile.tile_count),
+          best_confidence: Number(selectedProfile.best_confidence || 0),
+        },
+        tile_size: Number(selectedProfile.tile_size),
+        tile_sizes: tileSizes,
+        imgsz: Number(selectedProfile.imgsz),
+        imgszs,
+        requested_imgszs: requestedImgszs,
+        skipped_imgszs: skippedImgszs,
+        onnx_input_imgsz: request.onnx_input_imgsz || Number(runtime.imgsz || 640),
+        imgsz_adjusted_for_backend: Boolean(request.imgsz_adjusted_for_backend || skippedImgszs.length),
+        tile_overlap: overlap,
+        tile_stride: Number(selectedProfile.tile_stride),
+        tile_strides: tileStrides,
+        tile_count: profileResults.reduce((total, profile) => total + Number(profile.tile_count || 0), 0),
+        selected_tile_count: Number(selectedProfile.tile_count || 0),
+        raw_detection_count: profileResults.reduce((total, profile) => total + Number(profile.raw_detection_count || 0), 0),
+        nms_detection_count: defects.length,
+        confirmed_count: fusion.confirmed_defects.length,
+        suspected_count: fusion.suspected_defects.length,
+        discarded_count: fusion.discarded_defects.length,
+        confirmed_defects: fusion.confirmed_defects,
+        suspected_defects: fusion.suspected_defects,
+        fusion_rules: fusion.fusion_rules,
+        profile_summaries,
+      };
+      return {
+        ok: true,
+        job_id: payload.job_id,
+        defects,
+        confirmed_defects: fusion.confirmed_defects,
+        suspected_defects: fusion.suspected_defects,
+        confirmed_count: fusion.confirmed_defects.length,
+        suspected_count: fusion.suspected_defects.length,
+        detection_details,
+        inference_ms: Math.round((performance.now() - started) * 100) / 100,
+        inference_location: "phone_browser",
+        runtime: {
+          backend: runtime.backend,
+          imgsz: runtime.imgsz,
+          execution_provider: "onnxruntime-web",
+        },
+      };
+    }
+
+    async function runInferenceJob(payload) {
+      const runtime = await loadRuntime();
+      const started = performance.now();
+      const image = await imageFromUrl(payload.image_url);
+      if (payload.detection_request && ["tiled", "profile_ensemble"].includes(payload.detection_request.strategy)) {
+        return runTiledInferenceJob(payload, runtime, image, started);
+      }
+      return runSingleInferenceJob(payload, runtime, image, started);
+    }
+
+    async function connectInferenceWorker() {
+      const protocol = location.protocol === "https:" ? "wss" : "ws";
+      workerSocket = new WebSocket(`${protocol}://${location.host}/ws/phone-inference`);
+      workerSocket.addEventListener("open", async () => {
+        setWorkerStatus("推理通道已连接，正在加载 ONNX 模型...");
+        workerSocket.send(JSON.stringify({
+          type: "worker_hello",
+          payload: { user_agent: navigator.userAgent, ready: false },
+        }));
+        try {
+          const runtime = await loadRuntime();
+          workerSocket.send(JSON.stringify({
+            type: "worker_ready",
+            payload: { user_agent: navigator.userAgent, ready: true, runtime },
+          }));
+          setWorkerStatus(`手机推理节点已就绪 · imgsz=${runtime.imgsz} · conf=${runtime.conf}`);
+        } catch (error) {
+          setWorkerStatus(`手机推理节点不可用：${error.message || error}`);
+        }
+      });
+      workerSocket.addEventListener("close", () => {
+        setWorkerStatus("推理通道已断开，2 秒后重连...");
+        window.setTimeout(connectInferenceWorker, 2000);
+      });
+      workerSocket.addEventListener("message", async (event) => {
+        const packet = JSON.parse(event.data);
+        const payload = packet.payload || {};
+        if (packet.type !== "inference_request") return;
+        try {
+          setWorkerStatus(`正在手机端推理 job=${payload.job_id.slice(0, 8)}...`);
+          const result = await runInferenceJob(payload);
+          workerSocket.send(JSON.stringify({ type: "inference_result", payload: result }));
+          setWorkerStatus(`手机端推理完成 · 缺陷 ${result.defects.length} · ${Math.round(result.inference_ms)}ms`);
+        } catch (error) {
+          workerSocket.send(JSON.stringify({
+            type: "inference_error",
+            payload: { ok: false, job_id: payload.job_id, message: error.message || String(error) },
+          }));
+          setWorkerStatus(`手机端推理失败：${error.message || error}`);
+        }
+      });
+    }
+
+    async function compressImageForUpload(file) {
+      const maxDimension = 1600;
+      const quality = 0.82;
+      if (!file.type || !file.type.startsWith("image/")) {
+        return { blob: file, filename: file.name, compressed: false, grayscale: false, originalSize: file.size, uploadSize: file.size };
+      }
+
+      const image = await loadImageElement(file);
+      const sourceWidth = image.naturalWidth || image.width;
+      const sourceHeight = image.naturalHeight || image.height;
+      const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      ctx.drawImage(image, 0, 0, width, height);
+      convertCanvasToGrayscale(ctx, width, height);
+      const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+      if (!blob) {
+        return { blob: file, filename: file.name, compressed: false, grayscale: false, originalSize: file.size, uploadSize: file.size };
+      }
+      return {
+        blob,
+        filename: `${imageStem(file.name)}.jpg`,
+        compressed: blob.size < file.size,
+        grayscale: true,
+        originalSize: file.size,
+        uploadSize: blob.size,
+      };
+    }
+
+    async function refreshUploads() {
+      try {
+        const response = await fetch("/api/phone/uploads");
+        if (!response.ok) throw new Error(`uploads ${response.status}`);
+        const payload = await response.json();
+        const uploads = Array.isArray(payload.uploads) ? payload.uploads : [];
+        uploadList.innerHTML = "";
+        if (!uploads.length) {
+          uploadList.innerHTML = "<li>暂无上传记录</li>";
+          return;
+        }
+        for (const item of uploads.slice(0, 8)) {
+          const li = document.createElement("li");
+          const time = item.uploaded_at ? new Date(item.uploaded_at).toLocaleString() : "";
+          li.innerHTML = `<strong>${item.name || item.upload_id}</strong><span>${formatBytes(item.size_bytes)} · ${item.status || "uploaded"} · ${time}</span>`;
+          uploadList.append(li);
+        }
+      } catch (error) {
+        uploadList.innerHTML = "<li>上传列表读取失败</li>";
+      }
+    }
+
+    function setSelectedFile(file, sourceLabel) {
+      if (!file) {
+        preview.style.display = "none";
+        selectedFile = null;
+        setStatus("等待拍照或选择图片");
+        return;
+      }
+      selectedFile = file;
+      previewImage.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+      setStatus(`${sourceLabel}：${file.name} · ${formatBytes(file.size)}`);
+    }
+
+    takePhotoBtn.addEventListener("click", () => {
+      cameraInput.click();
+    });
+
+    chooseGalleryBtn.addEventListener("click", () => {
+      galleryInput.click();
+    });
+
+    cameraInput.addEventListener("change", () => {
+      setSelectedFile(cameraInput.files && cameraInput.files[0], "已拍照");
+    });
+
+    galleryInput.addEventListener("change", () => {
+      setSelectedFile(galleryInput.files && galleryInput.files[0], "已从图库选择");
+    });
+
+    uploadBtn.addEventListener("click", async () => {
+      const file = selectedFile;
+      if (!file) {
+        setStatus("请先拍照或选择图片", "bad");
+        return;
+      }
+      uploadBtn.disabled = true;
+      setStatus("正在转灰度并压缩图片...");
+      try {
+        const prepared = await compressImageForUpload(file);
+        const saving = prepared.grayscale
+          ? `已转灰度 ${formatBytes(prepared.originalSize)} → ${formatBytes(prepared.uploadSize)}，正在上传...`
+          : "正在上传...";
+        setStatus(saving);
+        const response = await fetch(`/api/phone/upload?filename=${encodeURIComponent(prepared.filename)}`, {
+          method: "POST",
+          headers: { "Content-Type": prepared.blob.type || file.type || "application/octet-stream" },
+          body: prepared.blob,
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `upload ${response.status}`);
+        }
+        const result = await response.json();
+        setStatus(`上传成功：${result.name || result.upload_id}`, "ok");
+        if (result.raw_image) {
+          previewImage.src = artifactUrl(result.raw_image);
+          preview.style.display = "block";
+        }
+        cameraInput.value = "";
+        galleryInput.value = "";
+        selectedFile = null;
+        await refreshUploads();
+      } catch (error) {
+        setStatus(`上传失败：${error.message || error}`, "bad");
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    });
+
+    refreshUploads();
+    connectInferenceWorker();
+  </script>
+</body>
+</html>
