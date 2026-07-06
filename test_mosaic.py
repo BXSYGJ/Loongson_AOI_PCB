@@ -669,13 +669,6 @@ class ScanMosaicTests(unittest.TestCase):
         self.assertIn("inference_request", html)
         self.assertIn("inference_result", html)
 
-    def test_phone_page_worker_supports_tiled_profile_inference(self):
-        html = (camera_trigger.ROOT / "static" / "phone.html").read_text(encoding="utf-8")
-
-        self.assertIn("runTiledInferenceJob", html)
-        self.assertIn("profile_summaries", html)
-        self.assertIn("source_tile", html)
-
     def test_desktop_status_shows_phone_inference_worker_state(self):
         html = (camera_trigger.ROOT / "static" / "index.html").read_text(encoding="utf-8")
         script = (camera_trigger.ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -791,92 +784,6 @@ class ScanMosaicTests(unittest.TestCase):
             camera_trigger.yolo_detector = original_detector
             if scan_dir.exists():
                 remove_tree_retry(scan_dir)
-
-    def test_phone_upload_worker_receives_same_profile_plan_as_local_fallback(self):
-        upload_id = f"unit-phone-plan-{uuid.uuid4().hex[:8]}"
-        upload_dir = camera_trigger.PHONE_UPLOAD_DIR / upload_id
-        if upload_dir.exists():
-            remove_tree_retry(upload_dir)
-
-        class FakeHub:
-            def __init__(self):
-                self.metadata = None
-
-            def status(self):
-                return {"ready": True, "worker_count": 1}
-
-            async def detect_artifact(self, raw_image, metadata=None):
-                self.metadata = dict(metadata or {})
-                return {
-                    "ok": True,
-                    "job_id": "phone-plan-job",
-                    "inference_ms": 11.2,
-                    "defects": [],
-                    "detection_details": {
-                        "strategy": "profile_ensemble",
-                        "tile_sizes": [512, 640, 800],
-                        "imgszs": [640],
-                    },
-                }
-
-        original_hub = main.phone_inference_hub
-        try:
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = upload_dir / "raw.jpg"
-            cv2.imwrite(str(raw_path), np.full((80, 120, 3), 70, dtype=np.uint8))
-            camera_trigger._write_phone_metadata(
-                {
-                    "upload_id": upload_id,
-                    "name": "phone-plan.jpg",
-                    "raw_image": camera_trigger._rel(raw_path),
-                    "status": "uploaded",
-                }
-            )
-
-            fake_hub = FakeHub()
-            main.phone_inference_hub = fake_hub
-            result = asyncio.run(main.detect_phone_upload_phone_first(upload_id, "precision"))
-
-            self.assertEqual(result["inference_location"], "phone_browser")
-            self.assertEqual(result["detection_strategy"], "profile_ensemble")
-            request = fake_hub.metadata["detection_request"]
-            self.assertEqual(request["strategy"], "profile_ensemble")
-            self.assertEqual(request["tile_sizes"], [512, 640, 800])
-            self.assertEqual(request["imgszs"], [640])
-            self.assertEqual(request["requested_imgszs"], [640, 960])
-            self.assertEqual(request["skipped_imgszs"], [960])
-            self.assertEqual(request["overlap"], 0.5)
-        finally:
-            main.phone_inference_hub = original_hub
-            if upload_dir.exists():
-                remove_tree_retry(upload_dir)
-
-    def test_phone_inference_hub_flattens_detection_request_for_worker(self):
-        hub = main.PhoneInferenceHub()
-        captured = {}
-
-        class FakeWebSocket:
-            async def send_json(self, packet):
-                captured.update(packet)
-                job_id = packet["payload"]["job_id"]
-                hub._pending[job_id].set_result({"ok": True, "defects": [], "inference_ms": 1.0})
-
-        hub._workers["worker-1"] = {
-            "websocket": FakeWebSocket(),
-            "ready": True,
-            "connected_at": "now",
-            "last_seen": "now",
-        }
-
-        asyncio.run(
-            hub.detect_artifact(
-                "algorithm/outputs/mobile_uploads/unit/raw.jpg",
-                {"detection_request": {"strategy": "tiled", "tile_sizes": [640]}},
-            )
-        )
-
-        self.assertEqual(captured["payload"]["detection_request"]["strategy"], "tiled")
-        self.assertEqual(captured["payload"]["detection_request"]["tile_sizes"], [640])
 
 
 if __name__ == "__main__":

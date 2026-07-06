@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import platform
 import re
 import shutil
 import sys
@@ -156,7 +157,7 @@ PHONE_MULTI_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_SUSPECTED_CONF
 VIDEO_DEFAULT_INFERENCE_FPS = _env_float("LOONGSON_AOI_VIDEO_INFERENCE_FPS", 5.0)
 VIDEO_DEFAULT_PREVIEW_FPS = _env_float("LOONGSON_AOI_VIDEO_PREVIEW_FPS", 8.0)
 CAMERA_SOURCE_FILE = Path(os.getenv("LOONGSON_AOI_CAMERA_SOURCE_FILE", ROOT / "camera_source.txt")).expanduser()
-DEFAULT_CAMERA_SOURCE = "1"
+DEFAULT_CAMERA_SOURCE = "0" if "loong" in platform.machine().lower() else "1"
 ONNX_INPUT_IMGSZ = _env_int("LOONGSON_AOI_ONNX_INPUT_IMGSZ", 0)
 OPENCV_THREADS = _env_int("LOONGSON_AOI_OPENCV_THREADS", 0)
 
@@ -553,9 +554,6 @@ class YoloDetector:
     def _resolve_onnx_input_imgsz(self) -> int | None:
         if self._onnx_input_imgsz:
             return self._onnx_input_imgsz
-        if ONNX_INPUT_IMGSZ > 0:
-            self._onnx_input_imgsz = ONNX_INPUT_IMGSZ
-            return self._onnx_input_imgsz
 
         try:
             import onnx  # type: ignore[import-not-found]
@@ -573,8 +571,40 @@ class YoloDetector:
         except Exception:
             pass
 
+        probed_imgsz = self._probe_onnx_input_imgsz()
+        if probed_imgsz:
+            self._onnx_input_imgsz = probed_imgsz
+            return self._onnx_input_imgsz
+
+        if ONNX_INPUT_IMGSZ > 0:
+            self._onnx_input_imgsz = ONNX_INPUT_IMGSZ
+            return self._onnx_input_imgsz
+
         self._onnx_input_imgsz = self.imgsz
         return self._onnx_input_imgsz
+
+    def _probe_onnx_input_imgsz(self) -> int | None:
+        cv2 = _import_cv2()
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+
+        candidates: list[int] = []
+        for value in (ONNX_INPUT_IMGSZ, self.imgsz, 640, 960, 1024, 1280):
+            if value and int(value) > 0 and int(value) not in candidates:
+                candidates.append(int(value))
+
+        for size in candidates:
+            try:
+                net = cv2.dnn.readNetFromONNX(str(self.weights))
+                blob = np.zeros((1, 3, size, size), dtype=np.float32)
+                net.setInput(blob)
+                net.forward()
+                return size
+            except Exception:
+                continue
+        return None
 
     def compatible_imgszs(self, requested_imgszs: list[int]) -> tuple[list[int], list[int], int | None]:
         normalized: list[int] = []
@@ -2291,6 +2321,33 @@ async def capture_detect_and_read(
 
 def camera_status(probe: bool = False) -> dict[str, Any]:
     return camera_manager.status(probe=probe)
+
+
+def set_camera_source(source: str) -> dict[str, Any]:
+    value = str(source or "").strip()
+    if not value:
+        raise CameraTriggerError("Camera source cannot be empty.")
+    if any(ch in value for ch in "\r\n"):
+        raise CameraTriggerError("Camera source must be a single line.")
+    CAMERA_SOURCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CAMERA_SOURCE_FILE.write_text(
+        "# Camera source selected from the AOI web UI.\n"
+        "# Examples: 0, 1, /dev/video0, rtsp://...\n"
+        f"{value}\n",
+        encoding="utf-8",
+    )
+    camera_manager.close()
+    status = camera_manager.status(probe=False)
+    env_source = os.getenv("LOONGSON_AOI_CAMERA_SOURCE")
+    return {
+        "ok": True,
+        "requested_source": value,
+        "active_source": status.get("source"),
+        "source_origin": status.get("source_origin"),
+        "config_file": str(CAMERA_SOURCE_FILE),
+        "env_override": bool(env_source and env_source.strip()),
+        "status": status,
+    }
 
 
 def detector_status() -> dict[str, Any]:

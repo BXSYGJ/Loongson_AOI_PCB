@@ -112,7 +112,7 @@ svg {
   width: min(1360px, 100%);
   margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
 }
 
@@ -248,7 +248,8 @@ svg {
 .scan-panel,
 .control-panel,
 .event-panel,
-.defect-panel {
+.defect-panel,
+.report-panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -268,10 +269,10 @@ svg {
 .top-control {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: auto minmax(360px, auto) auto;
   grid-template-areas:
-    "status actions"
-    "hint hint";
+    "status platform actions"
+    "hint hint hint";
   align-items: center;
   justify-content: end;
   gap: 8px 12px;
@@ -280,6 +281,53 @@ svg {
 .top-control .top-status {
   grid-area: status;
   justify-content: end;
+}
+
+.platform-switch {
+  grid-area: platform;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto repeat(3, minmax(88px, auto));
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7fafc;
+}
+
+.platform-switch > span {
+  padding-inline: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.platform-switch label {
+  position: relative;
+  min-height: 32px;
+  display: grid;
+  place-items: center;
+  padding-inline: 10px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.platform-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.platform-switch label:has(input:checked) {
+  color: var(--blue-strong);
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(23, 105, 170, 0.22), 0 1px 5px rgba(24, 44, 66, 0.08);
 }
 
 .top-actions {
@@ -467,7 +515,31 @@ label span,
   overflow: hidden;
 }
 
-.camera-preview img {
+.live-camera-block {
+  display: grid;
+  gap: 6px;
+}
+
+.preview-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preview-label-row strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.camera-preview.compact {
+  height: clamp(112px, 13vh, 168px);
+}
+
+.camera-preview img,
+.camera-preview video {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -485,6 +557,10 @@ label span,
 .camera-preview img:not([src]),
 .camera-preview img[src=""] {
   display: none;
+}
+
+.camera-preview video {
+  object-fit: contain;
 }
 
 .camera-preview div {
@@ -524,6 +600,65 @@ label span,
   height: 34px;
   min-width: 0;
   font-size: 13px;
+}
+
+.camera-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.camera-source-row input {
+  min-width: 0;
+  height: 36px;
+}
+
+.camera-source-row .secondary-btn {
+  height: 36px;
+  padding-inline: 14px;
+  white-space: nowrap;
+}
+
+.camera-source-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.camera-source-mode label {
+  position: relative;
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.camera-source-mode input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.camera-source-mode label:has(input:checked) {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: #eef7ff;
+}
+
+.browser-camera-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.browser-camera-actions .secondary-btn {
+  padding-inline: 8px;
 }
 
 .original-pcb-panel {
@@ -950,18 +1085,23 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.75fr) minmax(320px, 0.8fr);
   gap: 12px;
   overflow: hidden;
 }
 
 .event-panel,
-.defect-panel {
+.defect-panel,
+.report-panel {
   min-width: 0;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
+}
+
+.report-panel {
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 #eventLog {
@@ -1034,6 +1174,47 @@ button:disabled {
 .defect-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.report-toolbar {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-toolbar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-toolbar strong {
+  color: var(--ink);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.diagnosis-report {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 14px 16px;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  background:
+    linear-gradient(90deg, rgba(56, 102, 151, 0.05) 1px, transparent 1px),
+    linear-gradient(rgba(56, 102, 151, 0.05) 1px, transparent 1px),
+    #fff;
+  background-size: 20px 20px;
 }
 
 @media (max-width: 1120px) {
@@ -1119,6 +1300,7 @@ button:disabled {
     grid-template-columns: 1fr;
     grid-template-areas:
       "status"
+      "platform"
       "actions"
       "hint";
     justify-content: stretch;
@@ -1131,6 +1313,10 @@ button:disabled {
 
   .top-actions {
     grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .platform-switch {
+    grid-template-columns: 1fr;
   }
 
   .inspection-stage {

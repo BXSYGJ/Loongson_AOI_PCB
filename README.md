@@ -76,15 +76,23 @@ Then open `http://127.0.0.1:8001/`.
 
 The camera source can be changed without editing code.
 
+The Loongson board with OV9281 is usually `0`.  Some Windows or USB camera
+setups may enumerate the camera as `1`, so change only this value when moving
+between devices.
+
 Option 1: write the source into `camera_source.txt`:
 
 ```powershell
+Set-Content -Path .\camera_source.txt -Value "0"
+# Or, on another device:
 Set-Content -Path .\camera_source.txt -Value "1"
 ```
 
 Option 2: set an environment variable before starting the server:
 
 ```powershell
+$env:LOONGSON_AOI_CAMERA_SOURCE = "0"
+# Or, on another device:
 $env:LOONGSON_AOI_CAMERA_SOURCE = "1"
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
@@ -92,7 +100,7 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8000
 Useful camera variables:
 
 ```powershell
-$env:LOONGSON_AOI_CAMERA_SOURCE = "1"
+$env:LOONGSON_AOI_CAMERA_SOURCE = "0"
 $env:LOONGSON_AOI_CAMERA_WIDTH = "1280"
 $env:LOONGSON_AOI_CAMERA_HEIGHT = "800"
 $env:LOONGSON_AOI_CAMERA_BACKEND = "DSHOW"

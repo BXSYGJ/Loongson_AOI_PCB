@@ -1,0 +1,5 @@
+# Edit this value when the camera index changes.
+# Loongson OV9281 is usually 0. Some Windows USB cameras may be 1.
+# Examples: 0, 1, /dev/video0, rtsp://...
+# Environment variable LOONGSON_AOI_CAMERA_SOURCE has higher priority.
+0

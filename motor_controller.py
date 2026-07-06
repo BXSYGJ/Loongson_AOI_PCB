@@ -8,10 +8,19 @@ The public functions intentionally keep the contract used by
     move_to_xy(x, y)
     move_to_xy_stream(x, y, speed_mm_s, progress_callback)
 
-Distances are millimetres.  The default mechanics match the purchased
-XYZ PLC ball-screw slide table: 135 mm travel per axis and an 8 mm lead
-screw.  GPIO line offsets can be changed through environment variables
-without editing this file.
+Distances are millimetres.  The default mechanics and GPIO offsets now match
+the teammate-provided Loongson board wiring:
+
+    X_DIR=57, X_PULSE=59
+    Y_DIR=3,  Y_PULSE=60
+    Z_DIR=1,  Z_PULSE=2
+
+The defaults assume a 135 mm travel, an 8 mm lead screw, and a TB6600 set to
+full-step mode, which gives 200 pulses per 8 mm.  If the TB6600 DIP switches
+are changed to microstepping, set ``LOONGSON_AOI_MICROSTEP`` or the per-axis
+``LOONGSON_AOI_X_MICROSTEP``/``Y``/``Z`` environment variables accordingly.
+GPIO line offsets can also be changed through environment variables without
+editing this file.
 """
 
 from __future__ import annotations
@@ -131,7 +140,7 @@ class AxisConfig:
 def _axis_config(axis: str, default_dir: int, default_step: int) -> AxisConfig:
     common_lead = _env_float("LOONGSON_AOI_LEAD_MM", 8.0)
     common_steps = _env_int("LOONGSON_AOI_STEPS_PER_REV", 200)
-    common_microstep = _env_int("LOONGSON_AOI_MICROSTEP", 16)
+    common_microstep = _env_int("LOONGSON_AOI_MICROSTEP", 1)
 
     channels: list[StepChannel] = [
         StepChannel(
@@ -165,7 +174,7 @@ def _axis_config(axis: str, default_dir: int, default_step: int) -> AxisConfig:
         channels=tuple(channels),
         max_speed_mm_s=_env_float(f"LOONGSON_AOI_{axis}_MAX_SPEED_MM_S", _env_float("LOONGSON_AOI_MAX_SPEED_MM_S", 3.0)),
         start_speed_mm_s=_env_float(f"LOONGSON_AOI_{axis}_START_SPEED_MM_S", _env_float("LOONGSON_AOI_START_SPEED_MM_S", 0.8)),
-        pulse_width_s=_env_float(f"LOONGSON_AOI_{axis}_PULSE_WIDTH_US", _env_float("LOONGSON_AOI_PULSE_WIDTH_US", 500.0)) / 1_000_000.0,
+        pulse_width_s=_env_float(f"LOONGSON_AOI_{axis}_PULSE_WIDTH_US", _env_float("LOONGSON_AOI_PULSE_WIDTH_US", 5000.0)) / 1_000_000.0,
         ramp_fraction=_env_float(f"LOONGSON_AOI_{axis}_RAMP_FRACTION", _env_float("LOONGSON_AOI_RAMP_FRACTION", 0.15)),
         settle_s=_env_float(f"LOONGSON_AOI_{axis}_SETTLE_S", _env_float("LOONGSON_AOI_SETTLE_S", 0.02)),
         home_direction=-1 if _env_bool(f"LOONGSON_AOI_{axis}_HOME_NEGATIVE", True) else 1,
@@ -183,7 +192,7 @@ HOME_MODE = os.getenv("LOONGSON_AOI_HOME_MODE", "soft").strip().lower()
 Z_UP_POSITIVE = _env_bool("LOONGSON_AOI_Z_UP_POSITIVE", True)
 
 AXES: dict[str, AxisConfig] = {
-    "x": _axis_config("X", default_dir=4, default_step=7),
+    "x": _axis_config("X", default_dir=57, default_step=59),
     "y": _axis_config("Y", default_dir=3, default_step=60),
     "z": _axis_config("Z", default_dir=1, default_step=2),
 }
@@ -213,7 +222,19 @@ class MotionState:
             return
         for axis in self.axes:
             axis_data = data.get("axes", {}).get(axis, {})
-            self.steps[axis] = int(axis_data.get("steps", self.steps[axis]))
+            saved_steps = int(axis_data.get("steps", self.steps[axis]))
+            saved_ppm = axis_data.get("pulses_per_mm")
+            saved_position_mm = axis_data.get("position_mm")
+            current_ppm = self.axes[axis].pulses_per_mm
+            if saved_ppm is not None and saved_position_mm is not None:
+                try:
+                    if abs(float(saved_ppm) - current_ppm) > 1e-6:
+                        position_mm = float(saved_position_mm)
+                        if math.isfinite(position_mm) and 0.0 <= position_mm <= self.axes[axis].max_mm:
+                            saved_steps = int(round(position_mm * current_ppm))
+                except (TypeError, ValueError):
+                    pass
+            self.steps[axis] = saved_steps
             self.homed[axis] = bool(axis_data.get("homed", self.homed[axis]))
 
     def save(self) -> None:
