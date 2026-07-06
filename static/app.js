@@ -49,6 +49,12 @@ const state = {
   phoneUploads: [],
   selectedPhoneUploadId: "",
   phoneDetectionProfile: "fast",
+  detectionPlatform: "huawei_cloud",
+  detectionPlatformsStatus: null,
+  cameraInputMode: "backend",
+  browserCameraStream: null,
+  browserCameraReady: false,
+  phoneWorkerFrame: null,
   phoneResult: null,
   lastStatus: null,
   backendRunning: false,
@@ -57,6 +63,11 @@ const state = {
   videoTrail: [],
   imageCache: new Map(),
   mosaic: null,
+  llmReportConfigured: false,
+  reportTarget: null,
+  reportBusy: false,
+  reportMessage: "",
+  lastReport: null,
 };
 
 function ensureModeCards() {
@@ -112,6 +123,14 @@ const el = {
   originX: document.getElementById("originX"),
   originY: document.getElementById("originY"),
   imagePath: document.getElementById("imagePath"),
+  cameraSourcePanel: document.getElementById("cameraSourcePanel"),
+  cameraSourceInput: document.getElementById("cameraSourceInput"),
+  cameraSourceStatus: document.getElementById("cameraSourceStatus"),
+  applyCameraSourceBtn: document.getElementById("applyCameraSourceBtn"),
+  probeCameraSourceBtn: document.getElementById("probeCameraSourceBtn"),
+  cameraInputModeInputs: document.querySelectorAll('input[name="cameraInputMode"]'),
+  openBrowserCameraBtn: document.getElementById("openBrowserCameraBtn"),
+  captureBrowserFrameBtn: document.getElementById("captureBrowserFrameBtn"),
   simulationPanel: document.getElementById("simulationPanel"),
   phonePanel: document.getElementById("phonePanel"),
   phoneUploadUrls: document.getElementById("phoneUploadUrls"),
@@ -123,6 +142,8 @@ const el = {
   phoneUploadSelect: document.getElementById("phoneUploadSelect"),
   phoneProfileInputs: document.querySelectorAll('input[name="phoneDetectionProfile"]'),
   phoneProfileHint: document.getElementById("phoneProfileHint"),
+  platformInputs: document.querySelectorAll('input[name="detectionPlatform"]'),
+  localPlatformLabel: document.getElementById("localPlatformLabel"),
   videoPanel: document.getElementById("videoPanel"),
   videoSpeed: document.getElementById("videoSpeed"),
   videoInferenceFps: document.getElementById("videoInferenceFps"),
@@ -136,6 +157,10 @@ const el = {
   originalPcbName: document.getElementById("originalPcbName"),
   cameraPreview: document.getElementById("cameraPreview"),
   cameraPreviewStatus: document.getElementById("cameraPreviewStatus"),
+  liveCameraPanel: document.getElementById("liveCameraPanel"),
+  liveCameraPreview: document.getElementById("liveCameraPreview"),
+  browserCameraPreview: document.getElementById("browserCameraPreview"),
+  liveCameraStatus: document.getElementById("liveCameraStatus"),
   previewTitle: document.getElementById("previewTitle"),
   previewSourceText: document.getElementById("previewSourceText"),
   simulationSourceSelect: document.getElementById("simulationSourceSelect"),
@@ -145,6 +170,10 @@ const el = {
   captureStatus: document.getElementById("captureStatus"),
   weightsStatus: document.getElementById("weightsStatus"),
   scriptStatus: document.getElementById("scriptStatus"),
+  cloudInferenceStatus: document.getElementById("cloudInferenceStatus"),
+  phoneInferenceStatus: document.getElementById("phoneInferenceStatus"),
+  localDnnStatus: document.getElementById("localDnnStatus"),
+  llmReportStatus: document.getElementById("llmReportStatus"),
   lanUrls: document.getElementById("lanUrls"),
   zDist: document.getElementById("zDist"),
   rowsValue: document.getElementById("rowsValue"),
@@ -158,6 +187,11 @@ const el = {
   eventLog: document.getElementById("eventLog"),
   defectList: document.getElementById("defectList"),
   defectCount: document.getElementById("defectCount"),
+  generateReportBtn: document.getElementById("generateReportBtn"),
+  selectMosaicReportBtn: document.getElementById("selectMosaicReportBtn"),
+  reportTargetText: document.getElementById("reportTargetText"),
+  reportStatus: document.getElementById("reportStatus"),
+  diagnosisReport: document.getElementById("diagnosisReport"),
   eventFlowText: document.getElementById("eventFlowText"),
   canvas: document.getElementById("scanCanvas"),
   railButtons: document.querySelectorAll(".rail-btn"),
@@ -281,6 +315,8 @@ function connectWs() {
 function chooseMode(mode) {
   if (!MODE_META[mode]) return;
   state.mode = mode;
+  state.detectionPlatform = "huawei_cloud";
+  syncDetectionPlatformUi();
   document.body.dataset.mode = mode;
   el.modeScreen.classList.add("is-hidden");
   el.appShell.classList.remove("is-hidden");
@@ -301,7 +337,7 @@ function returnToModeScreen() {
 }
 
 function updateModeUi() {
-  const meta = MODE_META[state.mode] || MODE_META.handheld;
+  const meta = MODE_META[state.mode] || MODE_META.simulation;
   el.activeModeBadge.textContent = meta.label;
   el.modeDescription.textContent = meta.description;
   el.previewTitle.textContent = meta.previewTitle;
@@ -312,15 +348,18 @@ function updateModeUi() {
     card.classList.toggle("selected", card.dataset.mode === state.mode);
   });
   el.simulationPanel.classList.toggle("is-hidden", state.mode !== "simulation");
+  if (el.cameraSourcePanel) {
+    el.cameraSourcePanel.classList.toggle("is-hidden", state.mode !== "real");
+  }
   if (el.phonePanel) {
     el.phonePanel.classList.toggle("is-hidden", state.mode !== "phone");
   }
   if (el.simulationSourceSelect) {
     el.simulationSourceSelect.classList.toggle("is-hidden", state.mode !== "simulation");
   }
-  el.videoPanel.classList.toggle("is-hidden", !(state.mode === "video" || state.mode === "handheld"));
-  const videoMode = state.mode === "video";
-  const handheldMode = state.mode === "handheld";
+  el.videoPanel.classList.toggle("is-hidden", true);
+  const videoMode = false;
+  const handheldMode = false;
   const phoneMode = state.mode === "phone";
   for (const input of [el.pcbLength, el.pcbWidth, el.originX, el.originY]) {
     input.disabled = videoMode || handheldMode || phoneMode;
@@ -342,7 +381,8 @@ function updateModeUi() {
   if (!state.scanning) {
     el.startBtn.textContent = handheldMode ? "开始手持检测" : phoneMode ? "开始整图检测" : videoMode ? "开始视频检测" : "开始检测";
   }
-  setPhysicalControlsEnabled((state.mode === "real" || state.mode === "video") && !state.scanning);
+  setPhysicalControlsEnabled(state.mode === "real" && !state.scanning);
+  syncCameraInputModeUi();
   setCommandHint(handheldMode ? "手持模式可直接启动，不要求滑台回零" : phoneMode ? "请选择手机上传照片后开始整图检测" : "等待运行条件检查", "neutral");
   if (phoneMode) {
     updatePhoneProfileUi();
@@ -359,7 +399,9 @@ function setPhysicalControlsEnabled(enabled) {
 function simulationImageLabel(item) {
   if (!item) return "未选择 Source 图片";
   const size = item.size_bytes ? ` · ${formatBytes(item.size_bytes)}` : "";
-  return `${item.name || item.path}${size}`;
+  const dimensions = item.width && item.height ? ` · ${item.width}x${item.height}` : "";
+  const resized = item.resized ? " · 已缩放" : "";
+  return `${item.name || item.path}${dimensions}${size}${resized}`;
 }
 
 function currentSimulationImage() {
@@ -376,7 +418,9 @@ function updateOriginalPcbPreview(item = currentSimulationImage()) {
   }
 
   el.originalPcbName.textContent = item.name || item.path;
-  el.originalPcbStatus.textContent = `完整原图：${item.name || item.path}`;
+  const dimensions = item.width && item.height ? ` · ${item.width}x${item.height}` : "";
+  const resized = item.resized ? " · 已按板端安全尺寸缩放" : "";
+  el.originalPcbStatus.textContent = `完整原图：${item.name || item.path}${dimensions}${resized}`;
   el.originalPcbPreview.src = artifactUrl(item.path);
 }
 
@@ -420,7 +464,7 @@ function setSimulationSource(path, options = {}) {
   if (state.mode === "simulation") {
     el.previewTitle.textContent = MODE_META.simulation.previewTitle;
     el.previewSourceText.textContent = `Source: ${item.name || item.path}`;
-    el.cameraPreviewStatus.textContent = `已选择 ${item.name || item.path}`;
+    el.cameraPreviewStatus.textContent = `已选择 ${simulationImageLabel(item)}`;
     el.cameraPreview.src = artifactUrl(item.path);
     if (options.log !== false) {
       logEvent(`模拟 Source 已切换 ${item.path}`);
@@ -434,7 +478,9 @@ function phoneUploadLabel(item) {
   const size = item.size_bytes ? ` · ${formatBytes(item.size_bytes)}` : "";
   const status = item.status ? ` · ${item.status}` : "";
   const profile = item.detection_profile_label ? ` · ${item.detection_profile_label}` : "";
-  return `${item.name || item.upload_id}${size}${status}${profile}`;
+  const inference = inferenceLocationLabel(item);
+  const inferenceText = inference ? ` · ${inference}` : "";
+  return `${item.name || item.upload_id}${size}${status}${profile}${inferenceText}`;
 }
 
 function currentPhoneUpload() {
@@ -449,6 +495,90 @@ function phoneDetectionProfileHint(profile = state.phoneDetectionProfile) {
   return profile === "precision"
     ? "高精模式会运行多组 tile/imgsz 融合，适合复核，速度较慢。"
     : "快速模式只运行轻量切片，适合比赛演示和龙芯板默认运行。";
+}
+
+function inferenceLocationLabel(payload = {}) {
+  if (payload.detection_platform === "huawei_cloud" || payload.inference_location === "huawei_cloud") {
+    return "华为云";
+  }
+  if (payload.detection_platform === "local_dnn" || payload.inference_location === "local_dnn") {
+    return "本地 DNN";
+  }
+  if (payload.inference_location === "local_fallback" || payload.local_fallback) {
+    return "本机兜底";
+  }
+  if (payload.inference_location === "phone_browser") {
+    return "手机推理";
+  }
+  return payload.inference_location ? String(payload.inference_location) : "";
+}
+
+function currentDetectionPlatform() {
+  const checked = Array.prototype.find.call(el.platformInputs || [], (input) => input.checked);
+  state.detectionPlatform = checked ? checked.value : state.detectionPlatform || "huawei_cloud";
+  return state.detectionPlatform;
+}
+
+function detectionPlatformLabel(platform = currentDetectionPlatform()) {
+  if (platform === "huawei_cloud") return "华为云";
+  if (platform === "phone_browser") return "手机";
+  const hostLabel = state.detectionPlatformsStatus && state.detectionPlatformsStatus.host_label
+    ? state.detectionPlatformsStatus.host_label
+    : "本地电脑";
+  return `本地电脑(${hostLabel})`;
+}
+
+function syncDetectionPlatformUi() {
+  Array.prototype.forEach.call(el.platformInputs || [], (input) => {
+    input.checked = input.value === state.detectionPlatform;
+  });
+  if (el.localPlatformLabel) {
+    const hostLabel = state.detectionPlatformsStatus && state.detectionPlatformsStatus.host_label
+      ? state.detectionPlatformsStatus.host_label
+      : "本地电脑";
+    el.localPlatformLabel.textContent = `本地电脑(${hostLabel})`;
+  }
+}
+
+function maybeStartPhoneWorkerForSelectedPlatform() {
+  return null;
+}
+
+function currentCameraInputMode() {
+  const checked = Array.prototype.find.call(el.cameraInputModeInputs || [], (input) => input.checked);
+  state.cameraInputMode = checked ? checked.value : state.cameraInputMode || "backend";
+  return state.cameraInputMode;
+}
+
+function syncCameraInputModeUi() {
+  const mode = currentCameraInputMode();
+  const browserMode = mode === "browser";
+  if (el.cameraSourceInput) el.cameraSourceInput.disabled = browserMode;
+  if (el.applyCameraSourceBtn) el.applyCameraSourceBtn.disabled = browserMode;
+  if (el.probeCameraSourceBtn) el.probeCameraSourceBtn.disabled = browserMode;
+  if (el.openBrowserCameraBtn) el.openBrowserCameraBtn.disabled = !browserMode;
+  if (el.captureBrowserFrameBtn) el.captureBrowserFrameBtn.disabled = !browserMode || !state.browserCameraReady;
+  updateLiveCameraPreview();
+}
+
+function ensurePhoneWorkerFrame() {
+  return null;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function waitForPhoneWorkerReady(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let status = await refreshSystemStatus({ log: false });
+  while (Date.now() < deadline) {
+    const phone = status && (status.phone_inference || (status.detection_platforms && status.detection_platforms.phone_browser));
+    if (phone && phone.ready) return status;
+    await delay(500);
+    status = await refreshSystemStatus({ log: false });
+  }
+  return status;
 }
 
 function currentPhoneDetectionProfile() {
@@ -546,6 +676,11 @@ function setPhoneUpload(uploadId, options = {}) {
     updatePlanUi();
     renderDefects([], 0, 0);
     updatePreviewSource();
+    if (item && item.result_json) {
+      setReportTarget({ target_type: "phone", upload_id: item.upload_id }, `手机整图结果 · 缺陷 ${(item.defects || []).length} 项`);
+    } else {
+      setReportTarget(null, "请选择已完成检测的手机照片");
+    }
     drawCanvas();
   }
   if (item && options.log !== false) {
@@ -740,8 +875,40 @@ async function deleteSelectedPhoneUpload() {
   }
 }
 
+function updateLiveCameraPreview() {
+  const showLive = state.mode === "real";
+  if (!el.liveCameraPanel || !el.liveCameraPreview) return;
+  el.liveCameraPanel.classList.toggle("is-hidden", !showLive);
+  if (!showLive) {
+    el.liveCameraPreview.removeAttribute("src");
+    el.liveCameraPreview.classList.remove("is-hidden");
+    if (el.browserCameraPreview) el.browserCameraPreview.classList.add("is-hidden");
+    return;
+  }
+  if (currentCameraInputMode() === "browser") {
+    el.liveCameraPreview.removeAttribute("src");
+    el.liveCameraPreview.classList.add("is-hidden");
+    if (el.browserCameraPreview) {
+      el.browserCameraPreview.classList.remove("is-hidden");
+    }
+    if (el.liveCameraStatus) {
+      el.liveCameraStatus.textContent = state.browserCameraReady ? "浏览器相机已打开" : "等待打开浏览器相机";
+    }
+    return;
+  }
+  if (el.browserCameraPreview) el.browserCameraPreview.classList.add("is-hidden");
+  el.liveCameraPreview.classList.remove("is-hidden");
+  if (!el.liveCameraPreview.getAttribute("src")) {
+    el.liveCameraPreview.src = `/api/camera/stream.mjpg?ts=${Date.now()}`;
+  }
+  if (el.liveCameraStatus) {
+    el.liveCameraStatus.textContent = "连接中";
+  }
+}
+
 function updatePreviewSource() {
   state.previewOverride = null;
+  updateLiveCameraPreview();
   if (state.mode === "simulation") {
     el.reloadCameraBtn.textContent = "刷新";
     el.previewTitle.textContent = MODE_META.simulation.previewTitle;
@@ -784,12 +951,15 @@ function updatePreviewSource() {
 
 function startCameraPreview() {
   state.previewOverride = null;
-  const meta = MODE_META[state.mode] || MODE_META.handheld;
-  el.previewTitle.textContent = meta.previewTitle;
-  el.previewSourceText.textContent = meta.previewSource;
-  el.reloadCameraBtn.textContent = "重连";
-  el.cameraPreviewStatus.textContent = "连接相机流...";
-  el.cameraPreview.src = `/api/camera/stream.mjpg?ts=${Date.now()}`;
+  updateLiveCameraPreview();
+  el.previewTitle.textContent = "检测结果预览";
+  el.previewSourceText.textContent = "逐格照片 / 标注图";
+  el.reloadCameraBtn.textContent = "刷新";
+  const currentSrc = el.cameraPreview.getAttribute("src") || "";
+  if (!currentSrc || currentSrc.includes("/api/camera/stream.mjpg") || currentSrc.includes("/api/video/stream.mjpg")) {
+    el.cameraPreview.removeAttribute("src");
+  }
+  el.cameraPreviewStatus.textContent = "等待拍照检测结果，或点击 PCB 画板中的已检测区域";
 }
 
 function startVideoPreview() {
@@ -830,6 +1000,14 @@ async function uploadSimulationImages() {
         name: payload.name || file.name,
         path: payload.path,
         size_bytes: payload.size_bytes,
+        width: payload.width,
+        height: payload.height,
+        original_width: payload.original_width,
+        original_height: payload.original_height,
+        resized: Boolean(payload.resized),
+        board_safe_mode: Boolean(payload.board_safe_mode),
+        max_dimension: payload.max_dimension,
+        preprocess: payload.preprocess || [],
       };
       if (existingIndex >= 0) {
         state.simulationImages.splice(existingIndex, 1, imageItem);
@@ -841,7 +1019,9 @@ async function uploadSimulationImages() {
 
     if (uploaded.length) {
       setSimulationSource(uploaded[0].path, { log: false });
-      el.simulationUploadStatus.textContent = `已导入 ${uploaded.length} 张图片，可在 Source 区选择`;
+      const resizedCount = uploaded.filter((item) => item.resized).length;
+      const resizedText = resizedCount ? `，${resizedCount} 张已缩放到安全尺寸` : "";
+      el.simulationUploadStatus.textContent = `已导入 ${uploaded.length} 张图片${resizedText}，可在 Source 区选择`;
       updatePreviewSource();
     }
   } catch (error) {
@@ -968,17 +1148,236 @@ async function refreshSystemStatus(options = {}) {
     setStatusText(el.captureStatus, "状态接口异常", "bad");
     setStatusText(el.weightsStatus, "状态接口异常", "bad");
     setStatusText(el.scriptStatus, "状态接口异常", "bad");
+    if (el.llmReportStatus) {
+      setStatusText(el.llmReportStatus, "状态接口异常", "bad");
+    }
     logEvent(`系统状态刷新失败: ${message}`);
     return null;
+  }
+}
+
+async function applyCameraSource() {
+  if (!el.cameraSourceInput || !el.applyCameraSourceBtn) return;
+  const source = (el.cameraSourceInput.value || "").trim();
+  if (!source) {
+    el.cameraSourceStatus.textContent = "请输入相机编号或设备路径，例如 0、1、/dev/video0";
+    return;
+  }
+  el.applyCameraSourceBtn.disabled = true;
+  el.cameraSourceStatus.textContent = `正在切换相机源 ${source}...`;
+  try {
+    const response = await fetch("/api/camera/source", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || `camera source ${response.status}`);
+    }
+    const overrideText = payload.env_override ? "；当前环境变量仍优先" : "";
+    el.cameraSourceStatus.textContent = `已保存 ${payload.requested_source}，当前生效 ${payload.active_source}${overrideText}`;
+    logEvent(`相机源已设置为 ${payload.requested_source}`);
+    state.previewOverride = null;
+    await refreshSystemStatus({ log: true });
+    updateLiveCameraPreview();
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    el.cameraSourceStatus.textContent = `相机源设置失败：${message}`;
+    logEvent(`相机源设置失败: ${message}`);
+  } finally {
+    el.applyCameraSourceBtn.disabled = false;
+  }
+}
+
+async function probeCameraSource() {
+  if (el.cameraSourceStatus) {
+    el.cameraSourceStatus.textContent = "正在探测相机...";
+  }
+  try {
+    const response = await fetch("/api/camera/status?probe=true");
+    const payload = await response.json();
+    state.lastStatus = state.lastStatus || {};
+    state.lastStatus.camera = state.lastStatus.camera || {};
+    state.lastStatus.camera.runtime = payload;
+    if (el.cameraSourceInput && document.activeElement !== el.cameraSourceInput) {
+      el.cameraSourceInput.value = payload.source || "";
+    }
+    if (el.cameraSourceStatus) {
+      el.cameraSourceStatus.textContent = payload.opened
+        ? `相机已打开：${payload.source} · ${payload.width}x${payload.height}`
+        : `相机不可用：${payload.last_error || payload.source || "unknown"}`;
+    }
+    await refreshSystemStatus({ log: true });
+    updateLiveCameraPreview();
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    if (el.cameraSourceStatus) {
+      el.cameraSourceStatus.textContent = `探测失败：${message}`;
+    }
+    logEvent(`相机探测失败: ${message}`);
+  }
+}
+
+async function openBrowserCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    if (el.cameraSourceStatus) el.cameraSourceStatus.textContent = "当前浏览器不支持 getUserMedia，无法打开浏览器相机";
+    return;
+  }
+  try {
+    if (state.browserCameraStream) {
+      state.browserCameraStream.getTracks().forEach((track) => track.stop());
+      state.browserCameraStream = null;
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 800 },
+        facingMode: "environment",
+      },
+      audio: false,
+    });
+    state.browserCameraStream = stream;
+    state.browserCameraReady = true;
+    if (el.browserCameraPreview) {
+      el.browserCameraPreview.srcObject = stream;
+      el.browserCameraPreview.classList.remove("is-hidden");
+    }
+    if (el.liveCameraPreview) {
+      el.liveCameraPreview.removeAttribute("src");
+      el.liveCameraPreview.classList.add("is-hidden");
+    }
+    if (el.liveCameraStatus) el.liveCameraStatus.textContent = "浏览器相机已打开";
+    if (el.cameraSourceStatus) el.cameraSourceStatus.textContent = "浏览器相机已打开；点击“拍照检测”会按当前检测平台推理";
+    syncCameraInputModeUi();
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    state.browserCameraReady = false;
+    if (el.cameraSourceStatus) el.cameraSourceStatus.textContent = `浏览器相机打开失败：${message}`;
+    if (el.liveCameraStatus) el.liveCameraStatus.textContent = "浏览器相机不可用";
+    logEvent(`browser_camera_open_failed: ${message}`);
+    syncCameraInputModeUi();
+  }
+}
+
+function captureBrowserCameraBlob() {
+  return new Promise((resolve, reject) => {
+    const video = el.browserCameraPreview;
+    if (!video || !state.browserCameraReady || !video.videoWidth || !video.videoHeight) {
+      reject(new Error("浏览器相机尚未就绪"));
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("浏览器相机帧编码失败"));
+        return;
+      }
+      resolve(blob);
+    }, "image/jpeg", 0.9);
+  });
+}
+
+async function captureBrowserFrameDetection() {
+  if (currentCameraInputMode() !== "browser") {
+    setCommandHint("请先把相机输入源切换为浏览器相机", "warn");
+    return;
+  }
+  if (!state.browserCameraReady) {
+    await openBrowserCamera();
+  }
+  if (!state.browserCameraReady) return;
+
+  const platform = currentDetectionPlatform();
+  if (platform === "phone_browser") {
+    await waitForPhoneWorkerReady(7000);
+  }
+
+  setScanButtons(true);
+  state.scanning = true;
+  state.backendRunning = true;
+  state.results.clear();
+  state.cellArtifacts.clear();
+  state.mosaic = null;
+  state.phoneResult = null;
+  el.defectList.innerHTML = "";
+  el.defectCount.textContent = "0 items";
+  setCommandHint("浏览器相机拍照检测中", "good");
+  el.phaseValue.textContent = "Browser Capture";
+  el.progressBar.style.width = "20%";
+  try {
+    const blob = await captureBrowserCameraBlob();
+    const filename = `browser-camera-${Date.now()}.jpg`;
+    const uploadResponse = await fetch(`/api/phone/upload?filename=${encodeURIComponent(filename)}`, {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: blob,
+    });
+    const uploadPayload = await uploadResponse.json().catch(() => ({}));
+    if (!uploadResponse.ok || !uploadPayload.ok) {
+      throw new Error(uploadPayload.detail || uploadPayload.message || `upload ${uploadResponse.status}`);
+    }
+    mergePhoneUpload(Object.assign({}, uploadPayload, { source: "browser_camera" }));
+    state.selectedPhoneUploadId = uploadPayload.upload_id;
+    el.progressBar.style.width = "55%";
+    el.phaseValue.textContent = "Detecting";
+
+    const detectResponse = await fetch("/api/phone/detect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id: uploadPayload.upload_id,
+        detection_profile: "fast",
+        detection_platform: platform,
+      }),
+    });
+    const result = await detectResponse.json().catch(() => ({}));
+    if (!detectResponse.ok || !result.ok) {
+      throw new Error(result.detail || result.message || `detect ${detectResponse.status}`);
+    }
+    mergePhoneUpload(result);
+    state.phoneResult = result;
+    state.results.clear();
+    state.results.set("phone", decorateDefects(result.defects || [], result));
+    el.progressBar.style.width = "100%";
+    el.phaseValue.textContent = "Browser Complete";
+    renderDefects([], 0, 0);
+    showPreviewImage("浏览器", "整图", result.annotated_image || result.raw_image, "浏览器相机整图检测结果");
+    if (result.upload_id && result.result_json) {
+      setReportTarget({ target_type: "phone", upload_id: result.upload_id }, `浏览器相机整图结果 · 缺陷 ${(result.defects || []).length} 项`);
+    }
+    setCommandHint(`浏览器相机检测完成：${detectionPlatformLabel(platform)}`, "good");
+    logEvent(`browser_camera_result ${detectionPlatformLabel(platform)} defects=${(result.defects || []).length}`);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    el.phaseValue.textContent = "Browser Error";
+    setCommandHint(`浏览器相机检测失败：${message}`, "bad");
+    logEvent(`BROWSER CAMERA ERROR: ${message}`);
+  } finally {
+    state.scanning = false;
+    state.backendRunning = false;
+    setScanButtons(false);
+    syncCameraInputModeUi();
   }
 }
 
 function renderSystemStatus(status) {
   const motor = status.motor || {};
   const camera = status.camera || {};
+  const simulation = status.simulation || {};
   const algorithm = status.algorithm || {};
   const network = status.network || {};
+  const cloudDetection = status.cloud_detection || {};
+  const phoneInference = status.phone_inference || {};
+  const detectionPlatforms = status.detection_platforms || {};
+  const localDnn = detectionPlatforms.local_dnn || {};
+  const llmReport = status.llm_report || {};
   const runtime = camera.runtime || {};
+  const simulationRuntime = simulation.runtime || {};
   const weights = algorithm.weights || {};
   const config = algorithm.config || {};
   const script = algorithm.detect_script || {};
@@ -996,13 +1395,52 @@ function renderSystemStatus(status) {
     ? `已打开 ${runtime.source || ""} ${runtime.width || "-"}x${runtime.height || "-"}`
     : `不可用${runtime.last_error ? `：${runtime.last_error}` : ""}`;
   setStatusText(el.captureStatus, cameraText, runtime.opened ? "ok" : "bad");
+  if (el.cameraSourceInput && document.activeElement !== el.cameraSourceInput) {
+    el.cameraSourceInput.value = runtime.source || "";
+  }
+  if (el.cameraSourceStatus) {
+    const origin = runtime.source_origin || "default";
+    const probeText = detectionPlatforms.status_camera_probe ? "status probe on" : "status probe off";
+    const errorText = runtime.last_error ? ` · ${runtime.last_error}` : "";
+    el.cameraSourceStatus.textContent = `当前源 ${runtime.source || "-"} · ${origin} · ${probeText}${errorText}`;
+  }
   if (runtime.source && state.mode !== "simulation" && state.mode !== "phone" && !state.previewOverride) {
     const origin = runtime.source_origin ? ` · ${runtime.source_origin}` : "";
     el.previewSourceText.textContent = `OV9281 ${runtime.source}${origin}`;
   }
 
-  setStatusText(el.weightsStatus, weights.exists ? `已找到 ${formatBytes(weights.size_bytes)}` : "未找到 best.pt", weights.exists ? "ok" : "bad");
-  setStatusText(el.scriptStatus, script.exists && config.exists ? "脚本/配置可解析" : "脚本或配置缺失", script.exists && config.exists ? "ok" : "bad");
+  const runtimeBackend = algorithm.runtime && algorithm.runtime.backend ? algorithm.runtime.backend : "unknown";
+  setStatusText(el.weightsStatus, weights.exists ? `已找到 ${formatBytes(weights.size_bytes)}` : "未找到模型权重", weights.exists ? "ok" : "bad");
+  setStatusText(el.scriptStatus, script.exists && config.exists ? `${runtimeBackend} / 配置可解析` : "推理运行时或配置缺失", script.exists && config.exists ? "ok" : "bad");
+  if (el.cloudInferenceStatus) {
+    const cloudText = cloudDetection.enabled && cloudDetection.configured
+      ? `在线优先 · ${cloudDetection.api_base || "cloud"}`
+      : "未配置，跳过云端";
+    setStatusText(el.cloudInferenceStatus, cloudText, cloudDetection.enabled && cloudDetection.configured ? "ok" : "warn");
+  }
+  const readyWorkers = Number(phoneInference.ready_worker_count || 0);
+  const workerCount = Number(phoneInference.worker_count || 0);
+  const pendingJobs = Number(phoneInference.pending_jobs || 0);
+  const phoneInferenceText = phoneInference.ready
+    ? `在线 ${readyWorkers}/${workerCount}${pendingJobs ? ` · 等待 ${pendingJobs}` : ""}`
+    : "离线";
+  setStatusText(el.phoneInferenceStatus, phoneInferenceText, phoneInference.ready ? "ok" : "warn");
+  state.detectionPlatformsStatus = detectionPlatforms;
+  syncDetectionPlatformUi();
+  if (el.localDnnStatus) {
+    const localText = localDnn.model_exists
+      ? `可用 · ${localDnn.backend || "opencv_dnn"} · ${localDnn.imgsz || "-"}`
+      : "未找到本地 ONNX";
+    setStatusText(el.localDnnStatus, localText, localDnn.model_exists ? "ok" : "bad");
+  }
+  state.llmReportConfigured = Boolean(llmReport.configured);
+  if (el.llmReportStatus) {
+    const llmText = state.llmReportConfigured
+      ? `已配置 · ${llmReport.model || "model"}`
+      : "未配置 API Key";
+    setStatusText(el.llmReportStatus, llmText, state.llmReportConfigured ? "ok" : "warn");
+  }
+  renderReportControls();
 
   if (state.backendRunning && !state.scanning) {
     setCommandHint("已有检测任务运行，请先停止", "warn");
@@ -1015,11 +1453,19 @@ function renderSystemStatus(status) {
     el.cameraPreviewStatus.textContent = video.running
       ? `${label} ${video.fps || 0} FPS · frame ${video.frame_id || 0}`
       : `${label}流待启动`;
-  } else if (state.mode !== "simulation") {
+  } else if (state.mode === "simulation") {
+    const current = currentSimulationImage();
+    const safeMode = simulationRuntime.board_safe_mode ? "板端安全模式" : "模拟模式";
+    const maxDim = Number(simulationRuntime.max_dimension || 0);
+    const limitText = maxDim > 0 ? `长边≤${maxDim}px` : "导入尺寸不限制";
+    const threads = algorithm.runtime && algorithm.runtime.opencv_threads ? ` · OpenCV ${algorithm.runtime.opencv_threads}线程` : "";
+    const selected = current ? ` · ${current.name || current.path}` : "";
+    el.cameraPreviewStatus.textContent = `${safeMode} · ${limitText}${threads}${selected}`;
+  } else if (state.mode === "real") {
     if (runtime.opened) {
-      el.cameraPreviewStatus.textContent = `OV9281 ${runtime.width || "-"}x${runtime.height || "-"} 在线`;
+      if (el.liveCameraStatus) el.liveCameraStatus.textContent = `OV9281 ${runtime.width || "-"}x${runtime.height || "-"} 在线`;
     } else if (runtime.last_error) {
-      el.cameraPreviewStatus.textContent = runtime.last_error;
+      if (el.liveCameraStatus) el.liveCameraStatus.textContent = runtime.last_error;
     }
   }
   renderLanUrls(network.lan_urls || []);
@@ -1567,7 +2013,7 @@ function rememberCellArtifact(payload) {
     row: payload.row,
     col: payload.col,
   });
-  for (const field of ["raw_image", "annotated_image", "result_json", "latest_image", "source_image", "simulation_crop"]) {
+  for (const field of ["scan_id", "raw_image", "annotated_image", "result_json", "latest_image", "source_image", "simulation_crop"]) {
     if (payload[field]) next[field] = payload[field];
   }
   for (const field of ["capture_ms", "inference_ms", "status"]) {
@@ -1610,6 +2056,128 @@ function showCellArtifact(row, col) {
   }
 
   showPreviewImage(row, col, imagePath, artifact.annotated_image ? "检测标注图" : "原始图");
+  if (artifact.scan_id && artifact.result_json) {
+    setReportTarget(
+      {
+        target_type: "cell",
+        scan_id: artifact.scan_id,
+        row,
+        col,
+      },
+      `单格 r${String(row).padStart(3, "0")}_c${String(col).padStart(3, "0")}`,
+    );
+  } else {
+    setReportTarget(null, `区域 ${row},${col} 暂无可报告的检测 JSON`);
+  }
+}
+
+function reportTargetLabel(target) {
+  if (!target) return "请选择已检测单格、整板或手机结果";
+  if (target.target_type === "cell") {
+    return `单格报告 · ${target.scan_id || "-"} · r${String(target.row).padStart(3, "0")}_c${String(target.col).padStart(3, "0")}`;
+  }
+  if (target.target_type === "mosaic") {
+    return `整板报告 · ${target.scan_id || "-"}`;
+  }
+  if (target.target_type === "phone") {
+    return `手机整图报告 · ${target.upload_id || "-"}`;
+  }
+  return "未知报告目标";
+}
+
+function setReportTarget(target, message = "") {
+  state.reportTarget = target;
+  state.reportMessage = message || "";
+  renderReportControls();
+}
+
+function resetReportPanel(message = "检测完成后，可在这里生成中文 LLM 诊断报告。") {
+  state.reportTarget = null;
+  state.lastReport = null;
+  state.reportBusy = false;
+  state.reportMessage = "等待检测结果";
+  if (el.diagnosisReport) {
+    el.diagnosisReport.textContent = message;
+  }
+  renderReportControls();
+}
+
+function selectMosaicReportTarget() {
+  if (!state.mosaic || !state.mosaic.scan_id || !state.mosaic.mosaic_result_json) {
+    setReportTarget(null, "整板 PCB 结果尚未生成；请等待扫描和拼接复核完成");
+    return;
+  }
+  setReportTarget(
+    { target_type: "mosaic", scan_id: state.mosaic.scan_id },
+    `整板 PCB 结果 · 缺陷 ${(state.mosaic.defects || []).length} 项`,
+  );
+  showPreviewImage("整板", "PCB", state.mosaic.mosaic_annotated || state.mosaic.mosaic_raw, "整板 PCB 检测结果");
+}
+
+function renderReportControls() {
+  if (!el.generateReportBtn || !el.reportTargetText || !el.reportStatus) return;
+  const hasTarget = Boolean(state.reportTarget);
+  const hasMosaic = Boolean(state.mosaic && state.mosaic.scan_id && state.mosaic.mosaic_result_json);
+  el.reportTargetText.textContent = reportTargetLabel(state.reportTarget);
+  const disabled = state.reportBusy || state.scanning || state.backendRunning || !state.llmReportConfigured || !hasTarget;
+  el.generateReportBtn.disabled = disabled;
+  if (el.selectMosaicReportBtn) {
+    el.selectMosaicReportBtn.disabled = !hasMosaic || state.scanning || state.backendRunning;
+  }
+  el.generateReportBtn.textContent = state.reportBusy ? "生成中..." : "生成诊断报告";
+  if (state.reportBusy) {
+    el.reportStatus.textContent = "正在调用大模型";
+  } else if (!state.llmReportConfigured) {
+    el.reportStatus.textContent = hasTarget ? "LLM 未配置" : "等待检测结果";
+  } else if (!hasTarget) {
+    el.reportStatus.textContent = state.reportMessage || "等待检测结果";
+  } else {
+    el.reportStatus.textContent = state.reportMessage || "可生成";
+  }
+}
+
+async function generateDiagnosisReport() {
+  if (!state.reportTarget) {
+    setReportTarget(null, "请先点击已检测单格，或等待整板/手机检测完成");
+    return;
+  }
+  if (!state.llmReportConfigured) {
+    state.reportMessage = "LLM 未配置：请在后端设置 API Key";
+    renderReportControls();
+    logEvent("LLM 诊断未配置，跳过报告生成");
+    return;
+  }
+
+  state.reportBusy = true;
+  state.reportMessage = "";
+  renderReportControls();
+  try {
+    const response = await fetch("/api/llm/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.reportTarget),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.detail || `report ${response.status}`);
+    }
+    state.lastReport = data;
+    state.reportMessage = `已生成 · ${data.model || ""}`;
+    if (el.diagnosisReport) {
+      el.diagnosisReport.textContent = data.report_markdown || "报告为空";
+    }
+    logEvent(`llm_report ${state.reportTarget.target_type} saved=${data.report_path || "-"}`);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    state.reportMessage = "生成失败";
+    if (el.diagnosisReport) {
+      el.diagnosisReport.textContent = `诊断报告生成失败：${message}`;
+    }
+    logEvent(`LLM REPORT ERROR: ${message}`);
+  } finally {
+    state.reportBusy = false;
+    renderReportControls();
+  }
 }
 
 function updateProgress(progress) {
@@ -1633,11 +2201,15 @@ function resetScanUi() {
   el.phaseValue.textContent = "Idle";
   el.debounceValue.textContent = "Ready";
   renderDefects([], 0, 0);
+  resetReportPanel();
   drawCanvas();
 }
 
 function handlePacket(packet) {
   const payload = packet.payload || {};
+  if (packet.scan_id && !payload.scan_id) {
+    payload.scan_id = packet.scan_id;
+  }
   switch (packet.type) {
     case "ack":
       logEvent(payload.message || "ack");
@@ -1676,10 +2248,9 @@ function handlePacket(packet) {
       state.currentCell = { row: payload.row, col: payload.col };
       rememberCellArtifact(payload);
       updateProgress(payload.progress);
-      renderDefects(decorateDefects(payload.defects || [], payload), payload.row, payload.col);
       drawCanvas();
       showCellArtifact(payload.row, payload.col);
-      logEvent(`result row=${payload.row} col=${payload.col} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
+      logEvent(`result row=${payload.row} col=${payload.col} ${inferenceLocationLabel(payload)} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
       break;
     case "mosaic_result":
       state.mosaic = payload;
@@ -1695,6 +2266,9 @@ function handlePacket(packet) {
       renderDefects([], 0, 0);
       drawCanvas();
       showPreviewImage("整板", "复核", payload.mosaic_annotated || payload.mosaic_raw, "整板拼接复核图");
+      if (payload.scan_id && payload.mosaic_result_json) {
+        setReportTarget({ target_type: "mosaic", scan_id: payload.scan_id }, `整板拼接结果 · 缺陷 ${(payload.defects || []).length} 项`);
+      }
       logEvent(`mosaic_result cells=${payload.cell_count || 0} defects=${(payload.defects || []).length} stitch=${payload.stitch_ms ? Math.round(payload.stitch_ms) : "-"}ms`);
       break;
     case "mosaic_error":
@@ -1720,6 +2294,9 @@ function handlePacket(packet) {
         state.mosaic = payload.mosaic;
         if (state.mosaic.mosaic_raw) cachedArtifactImage(state.mosaic.mosaic_raw);
         if (state.mosaic.mosaic_annotated) cachedArtifactImage(state.mosaic.mosaic_annotated);
+        if (state.mosaic.scan_id && state.mosaic.mosaic_result_json) {
+          setReportTarget({ target_type: "mosaic", scan_id: state.mosaic.scan_id }, "整板拼接结果可生成报告");
+        }
         drawCanvas();
       }
       el.phaseValue.textContent = "Complete";
@@ -1848,11 +2425,18 @@ function handlePacket(packet) {
       renderDefects([], 0, 0);
       el.progressBar.style.width = "100%";
       el.phaseValue.textContent = "Phone Complete";
-      setCommandHint(`手机照片检测完成：${payload.detection_profile_label || phoneDetectionProfileLabel(payload.detection_profile)}`, "good");
+      {
+        const inference = inferenceLocationLabel(payload);
+        const inferenceText = inference ? ` · ${inference}` : "";
+        setCommandHint(`手机照片检测完成：${payload.detection_profile_label || phoneDetectionProfileLabel(payload.detection_profile)}${inferenceText}`, "good");
+      }
       showPreviewImage("手机", "整图", payload.annotated_image || payload.raw_image, "手机整图检测结果");
+      if (payload.upload_id && payload.result_json) {
+        setReportTarget({ target_type: "phone", upload_id: payload.upload_id }, `手机整图结果 · 缺陷 ${(payload.defects || []).length} 项`);
+      }
       drawCanvas();
       refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
-      logEvent(`phone_result ${payload.detection_profile_label || ""} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
+      logEvent(`phone_result ${payload.detection_profile_label || ""} ${inferenceLocationLabel(payload)} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
       break;
     case "phone_error":
       state.scanning = false;
@@ -1915,7 +2499,8 @@ function setScanButtons(scanning) {
   el.startBtn.disabled = busy;
   el.startBtn.textContent = busy ? busyText : idleText;
   el.stopBtn.classList.toggle("armed", busy);
-  setPhysicalControlsEnabled((state.mode === "real" || state.mode === "video") && !busy);
+  setPhysicalControlsEnabled(state.mode === "real" && !busy);
+  renderReportControls();
 }
 
 function modePreflight(status) {
@@ -1926,18 +2511,41 @@ function modePreflight(status) {
   const camera = status && status.camera ? status.camera : {};
   const motor = status && status.motor ? status.motor : {};
   const scan = status && status.scan ? status.scan : {};
+  const platforms = status && status.detection_platforms ? status.detection_platforms : {};
   const cameraReady = camera.runtime && camera.runtime.opened;
   const weightsReady = algorithm.weights && algorithm.weights.exists;
   const scriptReady = algorithm.detect_script && algorithm.detect_script.exists;
   const configReady = algorithm.config && algorithm.config.exists;
+  const platform = currentDetectionPlatform();
 
   if (scan.running && !state.scanning) {
     return { ok: false, message: "已有检测任务运行，请先停止" };
   }
-  if (!weightsReady || !scriptReady || !configReady) {
-    return { ok: false, message: "YOLO 权重、检测脚本或类别配置未就绪" };
+  if (platform === "huawei_cloud") {
+    const cloud = platforms.huawei_cloud || (status && status.cloud_detection) || {};
+    if (!(cloud.enabled && cloud.configured)) {
+      return { ok: false, message: "华为云检测未配置或未启用，请切换平台或配置云端地址" };
+    }
+  } else if (platform === "phone_browser") {
+    const phone = platforms.phone_browser || (status && status.phone_inference) || {};
+    if (!phone.ready) {
+      return { ok: false, message: "手机推理 worker 未连接，请先在手机端打开推理页面" };
+    }
+    if (!weightsReady || !configReady) {
+      return { ok: false, message: "手机推理需要本机提供 ONNX 权重和类别配置" };
+    }
+  } else if (platform === "local_dnn") {
+    const localDnn = platforms.local_dnn || {};
+    if (!localDnn.model_exists) {
+      return { ok: false, message: "本地 DNN 模型不存在，请检查 best.onnx 或 LOONGSON_AOI_LOCAL_DNN_MODEL" };
+    }
+    if (localDnn.last_error) {
+      return { ok: false, message: `本地 DNN 初始化失败：${localDnn.last_error}` };
+    }
+  } else if (!weightsReady || !scriptReady || !configReady) {
+    return { ok: false, message: "YOLO/ONNX 权重、推理运行时或类别配置未就绪" };
   }
-  if ((state.mode === "handheld" || state.mode === "real" || state.mode === "video") && !cameraReady) {
+  if (state.mode === "real" && currentCameraInputMode() !== "browser" && !cameraReady && platforms.status_camera_probe) {
     return { ok: false, message: "相机未打开，无法进入相机抓拍流程" };
   }
   if (state.mode === "simulation" && !state.simulationImagePath) {
@@ -1946,13 +2554,6 @@ function modePreflight(status) {
   if (state.mode === "phone" && !state.selectedPhoneUploadId) {
     return { ok: false, message: "请先选择一张手机上传照片" };
   }
-  if (state.mode === "video") {
-    const axes = motor.axes || {};
-    const homed = Boolean(axes.x && axes.x.homed && axes.y && axes.y.homed && axes.z && axes.z.homed);
-    if (!homed) {
-      return { ok: false, message: "视频检测需要先手动移动到物理原点并执行三轴回零" };
-    }
-  }
   if (state.mode === "real" && !motor.connected) {
     logEvent("真实模式提示：当前滑台状态不是 connected，请确认驱动配置或 dry-run 环境。");
   }
@@ -1960,12 +2561,20 @@ function modePreflight(status) {
 }
 
 async function startScan() {
+  if (currentDetectionPlatform() === "phone_browser") {
+    await waitForPhoneWorkerReady(7000);
+  }
   const status = await refreshSystemStatus({ log: true });
   const preflight = modePreflight(status);
   if (!preflight.ok) {
     el.phaseValue.textContent = "Preflight";
     setCommandHint(preflight.message, "bad");
     logEvent(`启动被拦截：${preflight.message}`);
+    return;
+  }
+
+  if (state.mode === "real" && currentCameraInputMode() === "browser") {
+    await captureBrowserFrameDetection();
     return;
   }
 
@@ -2007,6 +2616,7 @@ async function startScan() {
     const sent = send("start_phone_detection", {
       upload_id: state.selectedPhoneUploadId,
       detection_profile: detectionProfile,
+      detection_platform: currentDetectionPlatform(),
     });
     if (!sent) {
       state.backendRunning = false;
@@ -2034,6 +2644,7 @@ async function startScan() {
   const sent = send("start_scan", {
     operation_mode: state.mode,
     capture_mode: "real",
+    detection_platform: currentDetectionPlatform(),
     pcb_length_mm: Number(el.pcbLength.value),
     pcb_width_mm: Number(el.pcbWidth.value),
     origin_x_mm: Number(el.originX.value),
@@ -2059,6 +2670,9 @@ function selectCellFromCanvas(event) {
     el.xyReadout.textContent = "无滑台";
     if (item) {
       showPreviewImage("手机", "整图", item.annotated_image || item.raw_image, "手机整图预览");
+      if (item.result_json) {
+        setReportTarget({ target_type: "phone", upload_id: item.upload_id }, `手机整图结果 · 缺陷 ${(item.defects || []).length} 项`);
+      }
     }
     setCommandHint("手机拍照模式显示整张照片的检测结果", "neutral");
     return;
@@ -2155,6 +2769,12 @@ el.backToModesBtn.addEventListener("click", returnToModeScreen);
 el.pingBtn.addEventListener("click", () => send("ping"));
 el.stopBtn.addEventListener("click", () => send("stop_scan"));
 el.refreshStatusBtn.addEventListener("click", () => refreshSystemStatus({ log: true }));
+if (el.generateReportBtn) {
+  el.generateReportBtn.addEventListener("click", generateDiagnosisReport);
+}
+if (el.selectMosaicReportBtn) {
+  el.selectMosaicReportBtn.addEventListener("click", selectMosaicReportTarget);
+}
 el.reloadCameraBtn.addEventListener("click", () => {
   if (state.mode === "phone") {
     refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
@@ -2162,6 +2782,34 @@ el.reloadCameraBtn.addEventListener("click", () => {
   updatePreviewSource();
   refreshSystemStatus({ log: true });
 });
+if (el.applyCameraSourceBtn) {
+  el.applyCameraSourceBtn.addEventListener("click", applyCameraSource);
+}
+if (el.probeCameraSourceBtn) {
+  el.probeCameraSourceBtn.addEventListener("click", probeCameraSource);
+}
+Array.prototype.forEach.call(el.cameraInputModeInputs || [], (input) => {
+  input.addEventListener("change", () => {
+    state.cameraInputMode = input.value;
+    syncCameraInputModeUi();
+    setCommandHint(input.value === "browser" ? "已切换为浏览器相机；可打开相机后拍照检测" : "已切换为后端相机；真实模式将使用运行网站后端的设备", "neutral");
+    logEvent(`camera_input_mode ${input.value}`);
+  });
+});
+if (el.openBrowserCameraBtn) {
+  el.openBrowserCameraBtn.addEventListener("click", openBrowserCamera);
+}
+if (el.captureBrowserFrameBtn) {
+  el.captureBrowserFrameBtn.addEventListener("click", captureBrowserFrameDetection);
+}
+if (el.cameraSourceInput) {
+  el.cameraSourceInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyCameraSource();
+    }
+  });
+}
 el.uploadSimulationBtn.addEventListener("click", uploadSimulationImages);
 if (el.uploadPhoneBtn) {
   el.uploadPhoneBtn.addEventListener("click", uploadPhoneImages);
@@ -2181,6 +2829,15 @@ Array.prototype.forEach.call(el.phoneProfileInputs || [], (input) => {
   input.addEventListener("change", () => {
     updatePhoneProfileUi();
     logEvent(`手机检测模式切换为 ${phoneDetectionProfileLabel()}`);
+  });
+});
+Array.prototype.forEach.call(el.platformInputs || [], (input) => {
+  input.addEventListener("change", () => {
+    state.detectionPlatform = input.value;
+    syncDetectionPlatformUi();
+    maybeStartPhoneWorkerForSelectedPlatform();
+    setCommandHint(`检测平台已切换为 ${detectionPlatformLabel(input.value)}`, "neutral");
+    logEvent(`检测平台切换为 ${detectionPlatformLabel(input.value)}`);
   });
 });
 if (el.phoneImageFile) {
@@ -2206,7 +2863,7 @@ if (el.originalPcbPreview) {
   el.originalPcbPreview.addEventListener("load", () => {
     const item = currentSimulationImage();
     if (item && el.originalPcbStatus) {
-      el.originalPcbStatus.textContent = `完整原图已加载：${item.name || item.path}`;
+      el.originalPcbStatus.textContent = `完整原图已加载：${simulationImageLabel(item)}`;
     }
   });
   el.originalPcbPreview.addEventListener("error", () => {
@@ -2222,7 +2879,7 @@ el.cameraPreview.addEventListener("load", () => {
   }
   if (state.mode === "simulation") {
     const item = currentSimulationImage();
-    el.cameraPreviewStatus.textContent = item ? `模拟图已加载：${item.name || item.path}` : "等待导入 PCB 图片";
+    el.cameraPreviewStatus.textContent = item ? `模拟图已加载：${simulationImageLabel(item)}` : "等待导入 PCB 图片";
   } else if (state.mode === "phone") {
     const item = currentPhoneUpload();
     el.cameraPreviewStatus.textContent = item ? `手机照片已加载：${item.name || item.upload_id}` : "等待手机上传照片";
@@ -2241,6 +2898,14 @@ el.cameraPreview.addEventListener("error", () => {
       ? "实时检测流等待启动或连接失败"
       : "相机流连接失败";
 });
+if (el.liveCameraPreview) {
+  el.liveCameraPreview.addEventListener("load", () => {
+    if (el.liveCameraStatus) el.liveCameraStatus.textContent = "实时预览已连接";
+  });
+  el.liveCameraPreview.addEventListener("error", () => {
+    if (el.liveCameraStatus) el.liveCameraStatus.textContent = "实时预览连接失败";
+  });
+}
 el.homeBtn.addEventListener("click", () => send("home_all_axes"));
 el.startBtn.addEventListener("click", startScan);
 el.zUpBtn.addEventListener("click", () => send("z_jog", { direction: "up", dist: Number(el.zDist.value) }));
@@ -2254,3 +2919,4 @@ window.addEventListener("resize", drawCanvas);
 connectWs();
 refreshSystemStatus();
 renderDefects([], 0, 0);
+renderReportControls();

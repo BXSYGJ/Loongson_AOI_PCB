@@ -97,3 +97,7 @@ Thumbs.db
 *.temp
 .idea/
 *.swp
+
+# ==================== Local secrets ====================
+llm_config.local.ps1
+*.apiKey.local.csv

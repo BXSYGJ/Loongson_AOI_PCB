@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import platform
 import re
 import shutil
 import sys
@@ -44,6 +45,13 @@ def _env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
 def _is_algorithm_root(path: Path) -> bool:
     return (path / "algorithm" / "core" / "detect.py").exists() or (
         path / "algorithm" / "configs" / "pcb_defects.yaml"
@@ -84,14 +92,44 @@ DEFAULT_IMAGE = CAMERA_OUTPUT_DIR / "latest.jpg"
 VIDEO_LATEST_IMAGE = CAMERA_OUTPUT_DIR / "video_latest.jpg"
 VIDEO_LATEST_JSON = CAMERA_OUTPUT_DIR / "video_latest.json"
 DEFAULT_CONFIG = ALGORITHM_ROOT / "algorithm" / "configs" / "pcb_defects.yaml"
-DEFAULT_WEIGHTS = Path(
+DEFAULT_PT_WEIGHTS = ALGORITHM_ROOT / "runs" / "detect" / "pcb_defects" / "weights" / "best.pt"
+
+
+def _first_existing_path(candidates: list[Path], fallback: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return fallback
+
+
+DEFAULT_ONNX_WEIGHTS = Path(
     os.getenv(
-        "LOONGSON_AOI_WEIGHTS",
-        str(ALGORITHM_ROOT / "runs" / "detect" / "pcb_defects" / "weights" / "best.pt"),
+        "LOONGSON_AOI_ONNX_WEIGHTS",
+        str(
+            _first_existing_path(
+                [
+                    ALGORITHM_ROOT / "runs" / "detect" / "pcb_defects" / "weights" / "best.onnx",
+                    ALGORITHM_ROOT / "runs" / "detect" / "pcb_defects_20260704_035505" / "weights" / "best.onnx",
+                    ROOT.parent.parent
+                    / "Loongson_AOI_PCB"
+                    / "runs"
+                    / "detect"
+                    / "pcb_defects_20260704_035505"
+                    / "weights"
+                    / "best.onnx",
+                ],
+                ALGORITHM_ROOT / "runs" / "detect" / "pcb_defects" / "weights" / "best.onnx",
+            )
+        ),
     )
 ).expanduser()
+DEFAULT_WEIGHTS = Path(os.getenv("LOONGSON_AOI_WEIGHTS", str(DEFAULT_ONNX_WEIGHTS))).expanduser()
+DETECTOR_BACKEND = os.getenv("LOONGSON_AOI_DETECTOR_BACKEND", "auto").strip().lower()
 
 SIMULATION_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+BOARD_SAFE_MODE = _env_bool("LOONGSON_AOI_BOARD_SAFE_MODE", False)
+SIMULATION_MAX_DIMENSION = _env_int("LOONGSON_AOI_SIMULATION_MAX_DIMENSION", 0)
+SIMULATION_JPEG_QUALITY = _env_int("LOONGSON_AOI_SIMULATION_JPEG_QUALITY", 82)
 PHONE_MAX_UPLOAD_BYTES = _env_int("LOONGSON_AOI_PHONE_MAX_UPLOAD_MB", 20) * 1024 * 1024
 _PHONE_TILE_SIZE_ENV = os.getenv("LOONGSON_AOI_PHONE_TILE_SIZE")
 PHONE_TILE_SIZE = _env_int("LOONGSON_AOI_PHONE_TILE_SIZE", 640)
@@ -119,7 +157,9 @@ PHONE_MULTI_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_SUSPECTED_CONF
 VIDEO_DEFAULT_INFERENCE_FPS = _env_float("LOONGSON_AOI_VIDEO_INFERENCE_FPS", 5.0)
 VIDEO_DEFAULT_PREVIEW_FPS = _env_float("LOONGSON_AOI_VIDEO_PREVIEW_FPS", 8.0)
 CAMERA_SOURCE_FILE = Path(os.getenv("LOONGSON_AOI_CAMERA_SOURCE_FILE", ROOT / "camera_source.txt")).expanduser()
-DEFAULT_CAMERA_SOURCE = "1"
+DEFAULT_CAMERA_SOURCE = "0" if "loong" in platform.machine().lower() else "1"
+ONNX_INPUT_IMGSZ = _env_int("LOONGSON_AOI_ONNX_INPUT_IMGSZ", 0)
+OPENCV_THREADS = _env_int("LOONGSON_AOI_OPENCV_THREADS", 0)
 
 
 def _now_iso() -> str:
@@ -139,6 +179,16 @@ def _safe_filename(filename: str) -> str:
     stem = Path(source).stem
     stem = re.sub(r"[^0-9A-Za-z._-]+", "_", stem).strip("._-") or "pcb-image"
     return f"{stem}{suffix}"
+
+
+def simulation_runtime_config() -> dict[str, Any]:
+    return {
+        "board_safe_mode": BOARD_SAFE_MODE,
+        "max_dimension": SIMULATION_MAX_DIMENSION,
+        "jpeg_quality": SIMULATION_JPEG_QUALITY,
+        "recommended_pcb_mm": {"length": 30.0, "width": 30.0},
+        "recommended_mode": "simulation_single_cell",
+    }
 
 
 def normalize_phone_detection_profile(profile: str | None) -> str:
@@ -237,6 +287,11 @@ def _import_cv2():
         import cv2  # type: ignore[import-not-found]
     except ImportError as exc:
         raise CameraTriggerError("OpenCV/cv2 is not installed in this Python environment.") from exc
+    if OPENCV_THREADS > 0:
+        try:
+            cv2.setNumThreads(OPENCV_THREADS)
+        except Exception:
+            pass
     return cv2
 
 
@@ -426,19 +481,22 @@ class YoloDetector:
         self.weights = DEFAULT_WEIGHTS
         self.config = DEFAULT_CONFIG
         self.conf = _env_float("LOONGSON_AOI_YOLO_CONF", 0.5)
-        self.imgsz = _env_int("LOONGSON_AOI_YOLO_IMGSZ", 960)
+        self.imgsz = _env_int("LOONGSON_AOI_YOLO_IMGSZ", 640)
+        self.backend_preference = DETECTOR_BACKEND
         self._lock = threading.RLock()
         self._model: Any = None
+        self._backend: str | None = None
         self._names: dict[int, str] | None = None
         self._cn_names: dict[str, str] | None = None
         self._last_error: str | None = None
         self._loaded_at: str | None = None
+        self._onnx_input_imgsz: int | None = None
 
     def _load_label_maps(self) -> tuple[dict[int, str], dict[str, str]]:
         try:
             import yaml  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise CameraTriggerError("PyYAML is not installed; cannot read pcb_defects.yaml.") from exc
+        except ImportError:
+            return self._load_label_maps_without_yaml()
 
         if not self.config.exists():
             raise CameraTriggerError(f"YOLO class config does not exist: {self.config}")
@@ -448,17 +506,147 @@ class YoloDetector:
         cn_names = config.get("cn_names", {}) or {}
         return names, cn_names
 
+    def _load_label_maps_without_yaml(self) -> tuple[dict[int, str], dict[str, str]]:
+        default_names = {
+            0: "dry_solder_joint",
+            1: "improper_installation",
+            2: "pcb_damage",
+            3: "short_circuit",
+            4: "insufficient_solder",
+            5: "reverse_component",
+            6: "excess_solder",
+        }
+        if not self.config.exists():
+            return default_names, {}
+
+        section: str | None = None
+        names: dict[int, str] = {}
+        cn_names: dict[str, str] = {}
+        for line in self.config.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not line.startswith((" ", "\t")) and stripped.endswith(":"):
+                section = stripped[:-1]
+                continue
+            if section == "names":
+                match = re.match(r"\s*(\d+)\s*:\s*(.+?)\s*$", line)
+                if match:
+                    names[int(match.group(1))] = match.group(2).strip().strip("'\"")
+            elif section == "cn_names":
+                match = re.match(r"\s*([0-9A-Za-z_]+)\s*:\s*(.*?)\s*$", line)
+                if match:
+                    cn_names[match.group(1)] = match.group(2).strip().strip("'\"")
+        return (names or default_names), cn_names
+
+    def _resolve_backend(self) -> str:
+        preference = self.backend_preference or "auto"
+        if preference in {"onnx", "opencv", "opencv_dnn", "onnx_opencv"}:
+            return "onnx_opencv"
+        if preference in {"pt", "torch", "ultralytics", "yolo"}:
+            return "ultralytics"
+        if preference != "auto":
+            raise CameraTriggerError(f"Unsupported LOONGSON_AOI_DETECTOR_BACKEND: {self.backend_preference}")
+        if self.weights.suffix.lower() == ".onnx":
+            return "onnx_opencv"
+        return "ultralytics"
+
+    def _resolve_onnx_input_imgsz(self) -> int | None:
+        if self._onnx_input_imgsz:
+            return self._onnx_input_imgsz
+
+        try:
+            import onnx  # type: ignore[import-not-found]
+
+            model = onnx.load(str(self.weights))
+            if not model.graph.input:
+                return self.imgsz
+            dims = model.graph.input[0].type.tensor_type.shape.dim
+            if len(dims) >= 4:
+                height = int(dims[2].dim_value or 0)
+                width = int(dims[3].dim_value or 0)
+                if height > 0 and width > 0 and height == width:
+                    self._onnx_input_imgsz = height
+                    return self._onnx_input_imgsz
+        except Exception:
+            pass
+
+        probed_imgsz = self._probe_onnx_input_imgsz()
+        if probed_imgsz:
+            self._onnx_input_imgsz = probed_imgsz
+            return self._onnx_input_imgsz
+
+        if ONNX_INPUT_IMGSZ > 0:
+            self._onnx_input_imgsz = ONNX_INPUT_IMGSZ
+            return self._onnx_input_imgsz
+
+        self._onnx_input_imgsz = self.imgsz
+        return self._onnx_input_imgsz
+
+    def _probe_onnx_input_imgsz(self) -> int | None:
+        cv2 = _import_cv2()
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+
+        candidates: list[int] = []
+        for value in (ONNX_INPUT_IMGSZ, self.imgsz, 640, 960, 1024, 1280):
+            if value and int(value) > 0 and int(value) not in candidates:
+                candidates.append(int(value))
+
+        for size in candidates:
+            try:
+                net = cv2.dnn.readNetFromONNX(str(self.weights))
+                blob = np.zeros((1, 3, size, size), dtype=np.float32)
+                net.setInput(blob)
+                net.forward()
+                return size
+            except Exception:
+                continue
+        return None
+
+    def compatible_imgszs(self, requested_imgszs: list[int]) -> tuple[list[int], list[int], int | None]:
+        normalized: list[int] = []
+        for requested in requested_imgszs:
+            value = max(32, int(requested))
+            if value not in normalized:
+                normalized.append(value)
+        if self._resolve_backend() != "onnx_opencv":
+            return normalized, [], None
+
+        fixed_imgsz = self._resolve_onnx_input_imgsz()
+        if not fixed_imgsz:
+            return normalized, [], None
+
+        compatible = [value for value in normalized if value == fixed_imgsz]
+        skipped = [value for value in normalized if value != fixed_imgsz]
+        if not compatible:
+            compatible = [fixed_imgsz]
+        return compatible, skipped, fixed_imgsz
+
     def ensure_loaded(self) -> None:
         with self._lock:
             if self._model is not None:
                 return
             if not self.weights.exists():
-                raise CameraTriggerError(f"YOLO weights do not exist: {self.weights}")
+                raise CameraTriggerError(f"YOLO/ONNX weights do not exist: {self.weights}")
             try:
-                from ultralytics import YOLO  # type: ignore[import-not-found]
-
                 self._names, self._cn_names = self._load_label_maps()
-                self._model = YOLO(str(self.weights))
+                self._backend = self._resolve_backend()
+                if self._backend == "onnx_opencv":
+                    cv2 = _import_cv2()
+                    self._resolve_onnx_input_imgsz()
+                    self._model = cv2.dnn.readNetFromONNX(str(self.weights))
+                    try:
+                        self._model.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                        self._model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+                    except Exception:
+                        pass
+                else:
+                    from ultralytics import YOLO  # type: ignore[import-not-found]
+
+                    self._model = YOLO(str(self.weights))
                 self._loaded_at = _now_iso()
                 self._last_error = None
             except Exception as exc:
@@ -469,14 +657,133 @@ class YoloDetector:
         return {
             "loaded": self._model is not None,
             "loaded_at": self._loaded_at,
+            "backend": self._backend or self._resolve_backend(),
+            "backend_preference": self.backend_preference,
             "weights": str(self.weights),
             "weights_exists": self.weights.exists(),
+            "onnx_weights": str(DEFAULT_ONNX_WEIGHTS),
+            "onnx_weights_exists": DEFAULT_ONNX_WEIGHTS.exists(),
             "config": str(self.config),
             "config_exists": self.config.exists(),
             "conf": self.conf,
             "imgsz": self.imgsz,
+            "onnx_input_imgsz": self._onnx_input_imgsz or (self._resolve_onnx_input_imgsz() if self._resolve_backend() == "onnx_opencv" else None),
+            "opencv_threads": OPENCV_THREADS,
             "last_error": self._last_error,
         }
+
+    def _letterbox(self, image: Any, imgsz: int) -> tuple[Any, float, float, float]:
+        cv2 = _import_cv2()
+        height, width = image.shape[:2]
+        scale = min(imgsz / max(width, 1), imgsz / max(height, 1))
+        new_width = max(1, int(round(width * scale)))
+        new_height = max(1, int(round(height * scale)))
+        resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        pad_x = (imgsz - new_width) / 2.0
+        pad_y = (imgsz - new_height) / 2.0
+        left = int(round(pad_x - 0.1))
+        right = int(round(pad_x + 0.1))
+        top = int(round(pad_y - 0.1))
+        bottom = int(round(pad_y + 0.1))
+        padded = cv2.copyMakeBorder(
+            resized,
+            top,
+            bottom,
+            left,
+            right,
+            cv2.BORDER_CONSTANT,
+            value=(114, 114, 114),
+        )
+        return padded, scale, float(left), float(top)
+
+    def _onnx_predict(self, image: Any, imgsz: int) -> list[dict[str, Any]]:
+        import numpy as np  # type: ignore[import-not-found]
+
+        cv2 = _import_cv2()
+        assert self._model is not None
+        assert self._names is not None
+        assert self._cn_names is not None
+
+        fixed_imgsz = self._resolve_onnx_input_imgsz()
+        if fixed_imgsz and int(imgsz) != int(fixed_imgsz):
+            raise CameraTriggerError(
+                f"ONNX model has fixed input {fixed_imgsz}x{fixed_imgsz}; requested imgsz={imgsz}. "
+                "Export a dynamic/matching ONNX model or use LOONGSON_AOI_ONNX_INPUT_IMGSZ to match the model."
+            )
+
+        original_height, original_width = image.shape[:2]
+        input_image, scale, pad_x, pad_y = self._letterbox(image, imgsz)
+        blob = cv2.dnn.blobFromImage(input_image, scalefactor=1 / 255.0, size=(imgsz, imgsz), swapRB=True, crop=False)
+        self._model.setInput(blob)
+        output = self._model.forward()
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+        predictions = np.asarray(output)
+        if predictions.ndim == 3:
+            predictions = predictions[0]
+        if predictions.ndim != 2:
+            raise CameraTriggerError(f"Unsupported ONNX output shape: {tuple(np.asarray(output).shape)}")
+        class_count = len(self._names)
+        if predictions.shape[0] == class_count + 4:
+            predictions = predictions.T
+        elif predictions.shape[1] != class_count + 4:
+            raise CameraTriggerError(f"Unsupported ONNX output shape: {tuple(np.asarray(output).shape)}")
+
+        raw_detections: list[dict[str, Any]] = []
+        for prediction in predictions:
+            class_scores = prediction[4 : 4 + class_count]
+            class_id = int(np.argmax(class_scores))
+            confidence = float(class_scores[class_id])
+            if confidence < self.conf:
+                continue
+
+            cx, cy, width, height = [float(value) for value in prediction[:4]]
+            x1 = int(round((cx - width / 2.0 - pad_x) / scale))
+            y1 = int(round((cy - height / 2.0 - pad_y) / scale))
+            x2 = int(round((cx + width / 2.0 - pad_x) / scale))
+            y2 = int(round((cy + height / 2.0 - pad_y) / scale))
+            x1 = max(0, min(original_width - 1, x1))
+            y1 = max(0, min(original_height - 1, y1))
+            x2 = max(x1 + 1, min(original_width, x2))
+            y2 = max(y1 + 1, min(original_height, y2))
+
+            defect_type = self._names.get(class_id, str(class_id))
+            raw_detections.append(
+                {
+                    "type": defect_type,
+                    "label": self._cn_names.get(defect_type, defect_type),
+                    "bbox": [x1, y1, x2, y2],
+                    "confidence": round(confidence, 4),
+                }
+            )
+        return _nms_detections(raw_detections)
+
+    def _ultralytics_predict(self, source: Any, image_for_shape: Any, imgsz: int) -> list[dict[str, Any]]:
+        assert self._model is not None
+        assert self._names is not None
+        assert self._cn_names is not None
+        results = self._model.predict(source=source, conf=self.conf, imgsz=imgsz, verbose=False)
+
+        detections: list[dict[str, Any]] = []
+        image_height, image_width = image_for_shape.shape[:2]
+        for box in results[0].boxes:
+            class_id = int(box.cls[0].item())
+            confidence = float(box.conf[0].item())
+            defect_type = self._names.get(class_id, str(class_id))
+            bbox = [int(value) for value in box.xyxy[0].tolist()]
+            bbox[0] = max(0, min(image_width - 1, bbox[0]))
+            bbox[1] = max(0, min(image_height - 1, bbox[1]))
+            bbox[2] = max(bbox[0] + 1, min(image_width, bbox[2]))
+            bbox[3] = max(bbox[1] + 1, min(image_height, bbox[3]))
+            detections.append(
+                {
+                    "type": defect_type,
+                    "label": self._cn_names.get(defect_type, defect_type),
+                    "bbox": bbox,
+                    "confidence": round(confidence, 4),
+                }
+            )
+        return detections
 
     def detect_image(
         self,
@@ -497,24 +804,17 @@ class YoloDetector:
             assert self._model is not None
             assert self._names is not None
             assert self._cn_names is not None
-            results = self._model.predict(source=str(image_path), conf=self.conf, imgsz=self.imgsz, verbose=False)
-
-            detections: list[dict[str, Any]] = []
-            for box in results[0].boxes:
-                class_id = int(box.cls[0].item())
-                confidence = float(box.conf[0].item())
-                defect_type = self._names.get(class_id, str(class_id))
-                label = self._cn_names.get(defect_type, defect_type)
-                bbox = [int(value) for value in box.xyxy[0].tolist()]
-                detections.append(
-                    {
-                        "type": defect_type,
-                        "label": label,
-                        "bbox": bbox,
-                        "confidence": round(confidence, 4),
-                    }
+            if self._backend == "onnx_opencv":
+                detections = self._onnx_predict(image, self.imgsz)
+            else:
+                detections = self._ultralytics_predict(str(image_path), image, self.imgsz)
+            for detection in detections:
+                draw_detection(
+                    image,
+                    detection["bbox"],
+                    str(detection.get("label") or detection.get("type")),
+                    float(detection.get("confidence", 0.0)),
                 )
-                draw_detection(image, bbox, label, confidence)
 
         annotated_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -542,24 +842,17 @@ class YoloDetector:
             assert self._model is not None
             assert self._names is not None
             assert self._cn_names is not None
-            results = self._model.predict(source=image, conf=self.conf, imgsz=predict_imgsz, verbose=False)
-
-            detections: list[dict[str, Any]] = []
-            for box in results[0].boxes:
-                class_id = int(box.cls[0].item())
-                confidence = float(box.conf[0].item())
-                defect_type = self._names.get(class_id, str(class_id))
-                label = self._cn_names.get(defect_type, defect_type)
-                bbox = [int(value) for value in box.xyxy[0].tolist()]
-                detections.append(
-                    {
-                        "type": defect_type,
-                        "label": label,
-                        "bbox": bbox,
-                        "confidence": round(confidence, 4),
-                    }
+            if self._backend == "onnx_opencv":
+                detections = self._onnx_predict(image, predict_imgsz)
+            else:
+                detections = self._ultralytics_predict(image, image, predict_imgsz)
+            for detection in detections:
+                draw_detection(
+                    image,
+                    detection["bbox"],
+                    str(detection.get("label") or detection.get("type")),
+                    float(detection.get("confidence", 0.0)),
                 )
-                draw_detection(image, bbox, label, confidence)
 
         if annotated_path is not None:
             annotated_path.parent.mkdir(parents=True, exist_ok=True)
@@ -684,6 +977,7 @@ class VideoDetectionSession:
         stop_event: asyncio.Event,
         inference_fps: float | None = None,
         preview_fps: float | None = None,
+        inference_handler: Callable[[Any, Path], Awaitable[tuple[Any, Any, float] | tuple[Any, Any, float, dict[str, Any]]]] | None = None,
         on_detection: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_error: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
@@ -713,10 +1007,25 @@ class VideoDetectionSession:
         pending_inference: asyncio.Task | None = None
         pending_frame_id = 0
 
+        async def infer_frame(frame: Any) -> tuple[Any, Any, float, dict[str, Any]]:
+            if inference_handler is not None:
+                result = await inference_handler(frame, VIDEO_LATEST_IMAGE)
+                if len(result) == 4:
+                    detections, annotated, inference_ms, extra = result
+                    return detections, annotated, inference_ms, dict(extra or {})
+                detections, annotated, inference_ms = result
+                return detections, annotated, inference_ms, {}
+            detections, annotated, inference_ms = await asyncio.to_thread(yolo_detector.detect_frame, frame, VIDEO_LATEST_IMAGE)
+            return detections, annotated, inference_ms, {
+                "inference_location": "local_fallback",
+                "fallback_reason": "no_phone_worker_online",
+                "local_fallback": True,
+            }
+
         async def finish_inference(task: asyncio.Task, frame_id: int) -> None:
             nonlocal prev_inference_time
             try:
-                detections, annotated, inference_ms = await task
+                detections, annotated, inference_ms, extra_payload = await task
                 now = time.perf_counter()
                 fps = 1.0 / max(now - prev_inference_time, 1e-6)
                 prev_inference_time = now
@@ -734,6 +1043,7 @@ class VideoDetectionSession:
                     "latest_json": _rel(VIDEO_LATEST_JSON),
                     "captured_at": _now_iso(),
                 }
+                payload.update(extra_payload)
                 self._store_frame(annotated, payload)
                 if on_detection is not None:
                     await on_detection(payload)
@@ -763,9 +1073,7 @@ class VideoDetectionSession:
                     if pending_inference is None and now - last_inference_started >= inference_interval:
                         pending_frame_id = self._frame_id + 1
                         inference_frame = frame.copy()
-                        pending_inference = asyncio.create_task(
-                            asyncio.to_thread(yolo_detector.detect_frame, inference_frame, VIDEO_LATEST_IMAGE)
-                        )
+                        pending_inference = asyncio.create_task(infer_frame(inference_frame))
                         last_inference_started = now
                 except Exception as exc:
                     error_payload = {
@@ -1319,11 +1627,16 @@ def detect_tiled_image(
         requested_imgszs = [int(value) for value in imgsz]
     else:
         requested_imgszs = [int(imgsz)]
-    imgszs: list[int] = []
+    normalized_requested_imgszs: list[int] = []
     for requested in requested_imgszs:
         normalized = max(32, requested)
-        if normalized not in imgszs:
-            imgszs.append(normalized)
+        if normalized not in normalized_requested_imgszs:
+            normalized_requested_imgszs.append(normalized)
+
+    if hasattr(yolo_detector, "compatible_imgszs"):
+        imgszs, skipped_imgszs, fixed_onnx_imgsz = yolo_detector.compatible_imgszs(normalized_requested_imgszs)
+    else:
+        imgszs, skipped_imgszs, fixed_onnx_imgsz = normalized_requested_imgszs, [], None
 
     profile_results: list[dict[str, Any]] = []
     tile_strides: dict[int, int] = {}
@@ -1335,49 +1648,55 @@ def detect_tiled_image(
         for current_imgsz in imgszs:
             raw_detections: list[dict[str, Any]] = []
             tile_count = 0
-            for y in ys:
-                for x in xs:
-                    crop = image[y : min(height, y + current_tile_size), x : min(width, x + current_tile_size)]
-                    if crop.size == 0:
-                        continue
-                    tile_count += 1
-                    tile_detections, _, _ = yolo_detector.detect_frame(crop, imgsz=current_imgsz)
-                    for detection in tile_detections:
-                        x1, y1, x2, y2 = [int(value) for value in detection.get("bbox", [0, 0, 0, 0])]
-                        global_bbox = [
-                            max(0, min(width, x + x1)),
-                            max(0, min(height, y + y1)),
-                            max(0, min(width, x + x2)),
-                            max(0, min(height, y + y2)),
-                        ]
-                        if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
+            profile_error: str | None = None
+            try:
+                for y in ys:
+                    for x in xs:
+                        crop = image[y : min(height, y + current_tile_size), x : min(width, x + current_tile_size)]
+                        if crop.size == 0:
                             continue
-                        mapped = dict(detection)
-                        mapped["bbox"] = global_bbox
-                        mapped["source_tile"] = {
-                            "x": int(x),
-                            "y": int(y),
-                            "width": int(crop.shape[1]),
-                            "height": int(crop.shape[0]),
-                            "tile_size": int(current_tile_size),
-                            "imgsz": int(current_imgsz),
-                        }
-                        raw_detections.append(mapped)
+                        tile_count += 1
+                        tile_detections, _, _ = yolo_detector.detect_frame(crop, imgsz=current_imgsz)
+                        for detection in tile_detections:
+                            x1, y1, x2, y2 = [int(value) for value in detection.get("bbox", [0, 0, 0, 0])]
+                            global_bbox = [
+                                max(0, min(width, x + x1)),
+                                max(0, min(height, y + y1)),
+                                max(0, min(width, x + x2)),
+                                max(0, min(height, y + y2)),
+                            ]
+                            if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
+                                continue
+                            mapped = dict(detection)
+                            mapped["bbox"] = global_bbox
+                            mapped["source_tile"] = {
+                                "x": int(x),
+                                "y": int(y),
+                                "width": int(crop.shape[1]),
+                                "height": int(crop.shape[0]),
+                                "tile_size": int(current_tile_size),
+                                "imgsz": int(current_imgsz),
+                            }
+                            raw_detections.append(mapped)
+            except Exception as exc:
+                raw_detections = []
+                profile_error = str(exc)
 
             profile_detections = _nms_detections(raw_detections)
             best_confidence = max((float(item.get("confidence", 0.0)) for item in profile_detections), default=0.0)
-            profile_results.append(
-                {
-                    "tile_size": int(current_tile_size),
-                    "imgsz": int(current_imgsz),
-                    "tile_stride": int(stride),
-                    "tile_count": int(tile_count),
-                    "raw_detection_count": len(raw_detections),
-                    "nms_detection_count": len(profile_detections),
-                    "best_confidence": round(best_confidence, 4),
-                    "detections": profile_detections,
-                }
-            )
+            profile_result = {
+                "tile_size": int(current_tile_size),
+                "imgsz": int(current_imgsz),
+                "tile_stride": int(stride),
+                "tile_count": int(tile_count),
+                "raw_detection_count": len(raw_detections),
+                "nms_detection_count": len(profile_detections),
+                "best_confidence": round(best_confidence, 4),
+                "detections": profile_detections,
+            }
+            if profile_error:
+                profile_result["error"] = profile_error
+            profile_results.append(profile_result)
 
     selected_profile = max(
         profile_results,
@@ -1433,6 +1752,10 @@ def detect_tiled_image(
         "tile_sizes": tile_sizes,
         "imgsz": int(selected_profile["imgsz"]),
         "imgszs": imgszs,
+        "requested_imgszs": normalized_requested_imgszs,
+        "skipped_imgszs": skipped_imgszs,
+        "onnx_input_imgsz": fixed_onnx_imgsz,
+        "imgsz_adjusted_for_backend": bool(skipped_imgszs),
         "tile_overlap": overlap,
         "tile_stride": int(selected_profile["tile_stride"]),
         "tile_strides": {str(size): stride for size, stride in tile_strides.items()},
@@ -1455,6 +1778,7 @@ def detect_tiled_image(
                 "raw_detection_count": int(profile["raw_detection_count"]),
                 "nms_detection_count": int(profile["nms_detection_count"]),
                 "best_confidence": float(profile["best_confidence"]),
+                "error": profile.get("error"),
             }
             for profile in profile_results
         ],
@@ -1507,15 +1831,78 @@ def save_simulation_upload(filename: str, content: bytes) -> dict[str, Any]:
         raise CameraTriggerError("Uploaded simulation image is empty.")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = SIMULATION_IMPORT_DIR / f"{timestamp}_{safe_name}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(content)
-    return {
+    target_name = safe_name
+    original_size = len(content)
+    preprocess: list[str] = []
+    image_width: int | None = None
+    image_height: int | None = None
+    original_width: int | None = None
+    original_height: int | None = None
+
+    if SIMULATION_MAX_DIMENSION > 0:
+        cv2 = _import_cv2()
+        import numpy as np  # type: ignore[import-not-found]
+
+        encoded = np.frombuffer(content, dtype=np.uint8)
+        image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if image is None:
+            raise CameraTriggerError("Uploaded simulation image could not be decoded.")
+
+        original_height, original_width = image.shape[:2]
+        max_side = max(original_width, original_height)
+        if max_side > SIMULATION_MAX_DIMENSION:
+            scale = SIMULATION_MAX_DIMENSION / max_side
+            image_width = max(1, int(round(original_width * scale)))
+            image_height = max(1, int(round(original_height * scale)))
+            image = cv2.resize(image, (image_width, image_height), interpolation=cv2.INTER_AREA)
+            preprocess.append(f"resize_max_{SIMULATION_MAX_DIMENSION}")
+        else:
+            image_height, image_width = image.shape[:2]
+
+        target_name = f"{Path(safe_name).stem}.jpg"
+        target = SIMULATION_IMPORT_DIR / f"{timestamp}_{target_name}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        quality = max(1, min(100, SIMULATION_JPEG_QUALITY))
+        if not cv2.imwrite(str(target), image, [int(cv2.IMWRITE_JPEG_QUALITY), quality]):
+            raise CameraTriggerError(f"Failed to write simulation image: {target}")
+        preprocess.append("jpeg_reencode")
+    else:
+        target = SIMULATION_IMPORT_DIR / f"{timestamp}_{safe_name}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+        try:
+            cv2 = _import_cv2()
+            image = cv2.imread(str(target))
+            if image is not None:
+                image_height, image_width = image.shape[:2]
+                original_height, original_width = image_height, image_width
+        except Exception:
+            pass
+
+    payload = {
         "ok": True,
-        "name": safe_name,
+        "name": target_name,
+        "original_name": safe_name,
         "path": _rel(target),
+        "original_size_bytes": original_size,
         "size_bytes": target.stat().st_size,
+        "board_safe_mode": BOARD_SAFE_MODE,
+        "max_dimension": SIMULATION_MAX_DIMENSION,
+        "preprocess": preprocess,
     }
+    if original_width is not None and original_height is not None:
+        payload["original_width"] = int(original_width)
+        payload["original_height"] = int(original_height)
+    if image_width is not None and image_height is not None:
+        payload["width"] = int(image_width)
+        payload["height"] = int(image_height)
+        payload["resized"] = bool(
+            original_width is not None
+            and original_height is not None
+            and (int(image_width) != int(original_width) or int(image_height) != int(original_height))
+        )
+    return payload
 
 
 def _phone_upload_path(upload_id: str) -> Path:
@@ -1671,6 +2058,53 @@ def detect_phone_upload(upload_id: str, detection_profile: str | None = None) ->
             "inference_ms": round(inference_ms, 2),
             "detection_strategy": detection_details["strategy"],
             "detection_details": detection_details,
+            "operation_mode": "phone",
+        }
+    )
+    _write_phone_metadata(metadata)
+    return _phone_upload_public_payload(metadata)
+
+
+def detect_phone_upload_local_fallback(
+    upload_id: str,
+    detection_profile: str | None = None,
+    fallback_reason: str = "no_phone_worker_online",
+) -> dict[str, Any]:
+    result = detect_phone_upload(upload_id, detection_profile)
+    result["inference_location"] = "local_fallback"
+    result["fallback_reason"] = fallback_reason
+    result["local_fallback"] = True
+    return result
+
+
+def store_phone_detection_result(
+    upload_id: str,
+    result: dict[str, Any],
+    detection_profile: str | None = None,
+    detection_profile_label: str | None = None,
+) -> dict[str, Any]:
+    metadata = _read_phone_metadata(upload_id)
+    detections = list(result.get("defects") or [])
+    metadata.update(
+        {
+            "status": "detected",
+            "detected_at": _now_iso(),
+            "annotated_image": result.get("annotated_image"),
+            "result_json": result.get("result_json"),
+            "defects": detections,
+            "defect_count": len(detections),
+            "confirmed_defects": result.get("confirmed_defects", detections),
+            "suspected_defects": result.get("suspected_defects", []),
+            "confirmed_count": int(result.get("confirmed_count", len(detections))),
+            "suspected_count": int(result.get("suspected_count", 0)),
+            "detection_profile": detection_profile or result.get("detection_profile") or "fast",
+            "detection_profile_label": detection_profile_label or result.get("detection_profile_label") or "快速模式",
+            "inference_ms": result.get("inference_ms"),
+            "detection_strategy": result.get("detection_strategy") or "phone_first",
+            "detection_details": result.get("detection_details") or {},
+            "inference_location": result.get("inference_location"),
+            "fallback_reason": result.get("fallback_reason"),
+            "local_fallback": bool(result.get("local_fallback")),
             "operation_mode": "phone",
         }
     )
@@ -1857,6 +2291,9 @@ async def detect_captured_frame(
         "annotated_image": _rel(annotated_path),
         "capture_ms": None,
         "inference_ms": round(inference_ms, 2),
+        "inference_location": "local_fallback",
+        "fallback_reason": "no_phone_worker_online",
+        "local_fallback": True,
         "row": row,
         "col": col,
         "x_mm": x,
@@ -1886,6 +2323,33 @@ def camera_status(probe: bool = False) -> dict[str, Any]:
     return camera_manager.status(probe=probe)
 
 
+def set_camera_source(source: str) -> dict[str, Any]:
+    value = str(source or "").strip()
+    if not value:
+        raise CameraTriggerError("Camera source cannot be empty.")
+    if any(ch in value for ch in "\r\n"):
+        raise CameraTriggerError("Camera source must be a single line.")
+    CAMERA_SOURCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CAMERA_SOURCE_FILE.write_text(
+        "# Camera source selected from the AOI web UI.\n"
+        "# Examples: 0, 1, /dev/video0, rtsp://...\n"
+        f"{value}\n",
+        encoding="utf-8",
+    )
+    camera_manager.close()
+    status = camera_manager.status(probe=False)
+    env_source = os.getenv("LOONGSON_AOI_CAMERA_SOURCE")
+    return {
+        "ok": True,
+        "requested_source": value,
+        "active_source": status.get("source"),
+        "source_origin": status.get("source_origin"),
+        "config_file": str(CAMERA_SOURCE_FILE),
+        "env_override": bool(env_source and env_source.strip()),
+        "status": status,
+    }
+
+
 def detector_status() -> dict[str, Any]:
     return yolo_detector.status()
 
@@ -1904,6 +2368,7 @@ async def run_video_detection(
     stop_event: asyncio.Event,
     inference_fps: float | None = None,
     preview_fps: float | None = None,
+    inference_handler: Callable[[Any, Path], Awaitable[tuple[Any, Any, float] | tuple[Any, Any, float, dict[str, Any]]]] | None = None,
     on_detection: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     on_error: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> None:
@@ -1912,6 +2377,7 @@ async def run_video_detection(
         stop_event,
         inference_fps=inference_fps,
         preview_fps=preview_fps,
+        inference_handler=inference_handler,
         on_detection=on_detection,
         on_error=on_error,
     )

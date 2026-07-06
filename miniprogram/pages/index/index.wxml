@@ -1,0 +1,201 @@
+<view class="page">
+  <view class="hero">
+    <view>
+      <text class="brand">Loongson AOI</text>
+      <text class="title">单板 PCB 智能缺陷检测系统</text>
+      <text class="subtitle">与手机网页 /phone 和完整网站 / 保持同一后端、同一检测平台、同一结果格式。</text>
+    </view>
+    <view class="endpoint-card">
+      <view>
+        <text class="endpoint-label">完整网站</text>
+        <text class="endpoint-url">{{fullWebUrl}}</text>
+      </view>
+      <button class="mini-btn" bindtap="copyFullWebUrl">复制</button>
+      <view>
+        <text class="endpoint-label">手机上传页</text>
+        <text class="endpoint-url">{{phoneWebUrl}}</text>
+      </view>
+      <button class="mini-btn" bindtap="copyPhoneWebUrl">复制</button>
+    </view>
+  </view>
+
+  <view class="mode-grid">
+    <block wx:for="{{modes}}" wx:key="key">
+      <view class="mode-card {{activeMode === item.key ? 'active' : ''}}" data-mode="{{item.key}}" bindtap="chooseMode">
+        <view class="mode-icon">{{index + 1}}</view>
+        <text class="mode-name">{{item.name}}</text>
+        <text class="mode-desc">{{item.desc}}</text>
+        <text class="mode-tag">{{item.tag}}</text>
+      </view>
+    </block>
+  </view>
+
+  <view class="panel command-panel">
+    <view class="panel-head">
+      <view>
+        <text class="section-title">{{activeModeMeta.name}}</text>
+        <text class="section-subtitle">{{activeModeMeta.hint}}</text>
+      </view>
+      <button class="mini-btn" bindtap="refreshSystemStatus">刷新状态</button>
+    </view>
+
+    <view class="platform-switch">
+      <text class="switch-label">检测平台</text>
+      <block wx:for="{{platforms}}" wx:key="key">
+        <view class="platform-item {{detectionPlatform === item.key ? 'active' : ''}}" data-platform="{{item.key}}" bindtap="choosePlatform">
+          <text class="platform-name">{{item.name}}</text>
+          <text class="platform-desc">{{item.desc}}</text>
+        </view>
+      </block>
+    </view>
+  </view>
+
+  <view class="panel status-panel">
+    <view class="panel-head compact">
+      <text class="section-title">系统状态</text>
+      <text class="section-note">{{consoleBase}}</text>
+    </view>
+    <view class="status-grid">
+      <view><text>网站</text><strong>{{consoleStatusText}}</strong></view>
+      <view><text>华为云</text><strong>{{cloudStatusText}}</strong></view>
+      <view><text>手机 worker</text><strong>{{phoneWorkerText}}</strong></view>
+      <view><text>本地 DNN</text><strong>{{localDnnText}}</strong></view>
+      <view><text>相机</text><strong>{{cameraText}}</strong></view>
+      <view><text>滑台</text><strong>{{motorText}}</strong></view>
+      <view><text>LLM 诊断</text><strong>{{llmText}}</strong></view>
+    </view>
+  </view>
+
+  <view class="panel media-panel">
+    <view class="panel-head">
+      <view>
+        <text class="section-title">PCB 图片</text>
+        <text class="section-subtitle">支持拍照或图库；上传前由网站后端统一转灰度和保存。</text>
+      </view>
+    </view>
+    <view class="button-grid">
+      <button class="secondary" bindtap="chooseFromCamera">拍照</button>
+      <button class="secondary" bindtap="chooseFromAlbum">图库</button>
+    </view>
+    <view class="selected" wx:if="{{imagePath}}">
+      <image class="thumb" src="{{imagePath}}" mode="aspectFill" />
+      <view class="selected-meta">
+        <text class="selected-title">{{filename}}</text>
+        <text class="selected-desc">已选择，等待上传</text>
+      </view>
+    </view>
+
+    <view wx:if="{{activeMode === 'phone'}}">
+      <button class="primary" disabled="{{!imagePath || busy}}" bindtap="uploadSelectedToPhoneQueue">
+        {{busy ? "处理中..." : "上传到手机队列"}}
+      </button>
+    </view>
+    <view wx:if="{{activeMode === 'simulation'}}">
+      <button class="primary" disabled="{{!imagePath || busy}}" bindtap="uploadSimulationImage">
+        {{busy ? "导入中..." : "导入模拟图片"}}
+      </button>
+    </view>
+    <view wx:if="{{activeMode === 'real'}}" class="real-hint">
+      <text>真实模式由运行网站的龙芯端控制滑台和 OV9281。小程序不直接发运动命令，避免误触移动机构。</text>
+    </view>
+    <text class="status {{error ? 'bad' : ''}}">{{statusText}}</text>
+  </view>
+
+  <view class="panel" wx:if="{{activeMode === 'phone'}}">
+    <view class="panel-head">
+      <view>
+        <text class="section-title">手机上传队列</text>
+        <text class="section-subtitle">与网页 /phone、完整网站手机拍照模块共用。</text>
+      </view>
+      <button class="mini-btn" bindtap="refreshUploads">刷新</button>
+    </view>
+    <picker mode="selector" range="{{uploadLabels}}" bindchange="onUploadPickerChange">
+      <view class="picker-row">
+        <text>{{selectedUploadId || "暂无选中图片"}}</text>
+        <text>选择</text>
+      </view>
+    </picker>
+    <view class="button-grid small">
+      <button class="secondary" bindtap="deleteSelectedUpload">删除选中</button>
+      <button class="primary inline" disabled="{{!selectedUploadId || busy}}" bindtap="startDetection">
+        {{busy ? "检测中..." : "开始整图检测"}}
+      </button>
+    </view>
+
+    <radio-group class="profile-row" bindchange="onProfileChange">
+      <label class="profile {{profile === 'fast' ? 'active' : ''}}">
+        <radio value="fast" checked="{{profile === 'fast'}}" color="#1769aa" />
+        <view>
+          <text class="profile-name">快速模式</text>
+          <text class="profile-desc">比赛演示默认，速度优先。</text>
+        </view>
+      </label>
+      <label class="profile {{profile === 'precision' ? 'active' : ''}}">
+        <radio value="precision" checked="{{profile === 'precision'}}" color="#1769aa" />
+        <view>
+          <text class="profile-name">高精模式</text>
+          <text class="profile-desc">复核模式，耗时更高。</text>
+        </view>
+      </label>
+    </radio-group>
+  </view>
+
+  <view class="panel task-panel" wx:if="{{selectedUploadId || progress}}">
+    <view class="panel-head compact">
+      <text class="section-title">任务状态</text>
+      <text class="section-note">{{detectionSourceText}}</text>
+    </view>
+    <view class="kv"><text>Upload ID</text><text>{{selectedUploadId || "-"}}</text></view>
+    <view class="kv"><text>检测模式</text><text>{{profileText}}</text></view>
+    <view class="kv"><text>推理耗时</text><text>{{inferenceMs}} ms</text></view>
+    <view class="progress"><view class="bar" style="width: {{progress}}%;"></view></view>
+  </view>
+
+  <view class="panel image-panel" wx:if="{{rawUrl || annotatedUrl}}">
+    <view class="panel-head compact">
+      <text class="section-title">PCB 检测示意图</text>
+      <text class="section-note">整图结果</text>
+    </view>
+    <image wx:if="{{annotatedUrl}}" class="result-image" src="{{annotatedUrl}}" mode="widthFix" />
+    <image wx:elif="{{rawUrl}}" class="result-image" src="{{rawUrl}}" mode="widthFix" />
+    <view class="result-meta">
+      <text>缺陷数：{{defectCount}}</text>
+      <text>平台：{{detectionSourceText}}</text>
+    </view>
+  </view>
+
+  <view class="panel" wx:if="{{defects.length}}">
+    <view class="panel-head compact">
+      <text class="section-title">缺陷账本</text>
+      <text class="section-note">最终结果</text>
+    </view>
+    <block wx:for="{{defects}}" wx:key="index">
+      <view class="defect-row">
+        <text class="defect-label">{{item.label || item.type}}</text>
+        <text class="defect-conf">{{item.confidenceText}}</text>
+        <text class="defect-bbox">bbox [{{item.bbox[0]}}, {{item.bbox[1]}}, {{item.bbox[2]}}, {{item.bbox[3]}}]</text>
+      </view>
+    </block>
+  </view>
+
+  <view class="panel report-panel">
+    <view class="panel-head">
+      <view>
+        <text class="section-title">LLM 诊断报告</text>
+        <text class="section-subtitle">{{reportStatus}}</text>
+      </view>
+      <button class="mini-btn" disabled="{{!selectedUploadId || !annotatedUrl}}" bindtap="generateReport">生成</button>
+    </view>
+    <text class="report-text" wx:if="{{reportMarkdown}}">{{reportMarkdown}}</text>
+  </view>
+
+  <view class="panel log-panel">
+    <view class="panel-head compact">
+      <text class="section-title">工艺事件流</text>
+      <text class="section-note">最新在上</text>
+    </view>
+    <block wx:for="{{logs}}" wx:key="index">
+      <text class="log-line">{{item}}</text>
+    </block>
+  </view>
+</view>

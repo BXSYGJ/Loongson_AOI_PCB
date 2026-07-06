@@ -1,10 +1,12 @@
 import asyncio
+import json
 import math
 import os
 import platform
 import re
 import socket
 import subprocess
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,9 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import camera_trigger
+from detection_router import CloudDetectionUnavailable, cloud_detection_client
+import llm_reporter
+from local_dnn_detector import LocalDnnError, local_dnn_detector
 import motor_controller
 
 
@@ -34,7 +39,33 @@ VIDEO_OVERLAP = float(os.getenv("LOONGSON_AOI_VIDEO_OVERLAP", "0.2"))
 MOCK_INFERENCE_SECONDS = 0.35
 LAN_LISTEN_HOST = "0.0.0.0"
 LAN_LISTEN_PORT = int(os.getenv("LOONGSON_AOI_LAN_PORT", os.getenv("PORT", "8000")))
-OPERATION_MODES = {"handheld", "simulation", "real", "video", "phone", "mock"}
+OPERATION_MODES = {"simulation", "real", "phone", "mock"}
+DETECTION_PLATFORMS = {"huawei_cloud", "phone_browser", "local_dnn"}
+DEFAULT_DETECTION_PLATFORM = "huawei_cloud"
+PHONE_WORKER_TIMEOUT_SECONDS = float(os.getenv("LOONGSON_AOI_PHONE_WORKER_TIMEOUT_SECONDS", "20"))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _is_loongson_host() -> bool:
+    return "loong" in platform.machine().lower()
+
+
+EDGE_SAFE_MODE = _env_bool("LOONGSON_AOI_EDGE_SAFE_MODE", _is_loongson_host())
+STATUS_CAMERA_PROBE = _env_bool("LOONGSON_AOI_STATUS_CAMERA_PROBE", not EDGE_SAFE_MODE)
+PHONE_WORKER_ALLOW_DESKTOP = _env_bool("LOONGSON_AOI_ALLOW_DESKTOP_PHONE_WORKER", False)
+
+
+def _is_phone_worker(info: dict[str, Any]) -> bool:
+    if PHONE_WORKER_ALLOW_DESKTOP:
+        return True
+    user_agent = str(info.get("user_agent") or "").lower()
+    return bool(re.search(r"android|iphone|ipad|ipod|mobile|harmonyos|honor|huawei|miuibrowser", user_agent))
 
 
 app = FastAPI(title="Loongson AOI PCB Console", version="0.2.0")
@@ -43,6 +74,366 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 scan_lock = asyncio.Lock()
 active_stop_event: asyncio.Event | None = None
 active_scan_task: asyncio.Task | None = None
+
+
+class PhoneInferenceUnavailable(RuntimeError):
+    pass
+
+
+class PhoneInferenceHub:
+    def __init__(self) -> None:
+        self._workers: dict[str, dict[str, Any]] = {}
+        self._pending: dict[str, asyncio.Future] = {}
+        self._lock = asyncio.Lock()
+
+    def status(self) -> dict[str, Any]:
+        ready_workers = [
+            {
+                "worker_id": worker_id,
+                "ready": bool(info.get("ready")),
+                "user_agent": info.get("user_agent"),
+                "connected_at": info.get("connected_at"),
+                "last_seen": info.get("last_seen"),
+                "runtime": info.get("runtime") or {},
+            }
+            for worker_id, info in self._workers.items()
+            if bool(info.get("ready")) and _is_phone_worker(info)
+        ]
+        ignored_desktop_workers = [
+            worker_id
+            for worker_id, info in self._workers.items()
+            if bool(info.get("ready")) and not _is_phone_worker(info)
+        ]
+        return {
+            "ready": bool(ready_workers),
+            "worker_count": len(self._workers),
+            "ready_worker_count": len(ready_workers),
+            "ignored_desktop_worker_count": len(ignored_desktop_workers),
+            "desktop_worker_allowed": PHONE_WORKER_ALLOW_DESKTOP,
+            "pending_jobs": len(self._pending),
+            "timeout_seconds": PHONE_WORKER_TIMEOUT_SECONDS,
+            "workers": ready_workers,
+            "message": "Phone browser inference worker is ready." if ready_workers else "No phone device inference worker is connected.",
+        }
+
+    async def detect_artifact(self, raw_image: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        async with self._lock:
+            ready_items = [
+                (worker_id, info)
+                for worker_id, info in self._workers.items()
+                if bool(info.get("ready")) and _is_phone_worker(info)
+            ]
+            if not ready_items:
+                raise PhoneInferenceUnavailable("no_phone_worker_online")
+            worker_id, worker = ready_items[0]
+            websocket: WebSocket = worker["websocket"]
+            job_id = str(uuid.uuid4())
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future = loop.create_future()
+            self._pending[job_id] = future
+            payload = {
+                "job_id": job_id,
+                "raw_image": raw_image,
+                "image_url": f"/api/artifact?path={raw_image}",
+                "metadata": dict(metadata or {}),
+                "requested_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            try:
+                await websocket.send_json({"type": "inference_request", "payload": payload})
+            except Exception as exc:
+                self._pending.pop(job_id, None)
+                self._workers.pop(worker_id, None)
+                raise PhoneInferenceUnavailable(f"phone_worker_send_failed: {exc}") from exc
+
+        try:
+            result = await asyncio.wait_for(future, timeout=PHONE_WORKER_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            self._pending.pop(job_id, None)
+            raise PhoneInferenceUnavailable("phone_worker_timeout") from exc
+        if not result.get("ok", True):
+            raise PhoneInferenceUnavailable(result.get("message") or result.get("error") or "phone_worker_failed")
+        return result
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        worker_id = str(uuid.uuid4())
+        self._workers[worker_id] = {
+            "websocket": websocket,
+            "ready": False,
+            "connected_at": datetime.now().isoformat(timespec="seconds"),
+            "last_seen": datetime.now().isoformat(timespec="seconds"),
+        }
+        await websocket.send_json({"type": "worker_registered", "payload": {"worker_id": worker_id, "runtime": phone_inference_runtime_config()}})
+        try:
+            while True:
+                packet = await websocket.receive_json()
+                packet_type = str(packet.get("type") or "")
+                payload = packet.get("payload") or {}
+                worker = self._workers.get(worker_id)
+                if worker is not None:
+                    worker["last_seen"] = datetime.now().isoformat(timespec="seconds")
+                if packet_type in {"worker_hello", "worker_ready"}:
+                    if worker is not None:
+                        worker["ready"] = packet_type == "worker_ready" or bool(payload.get("ready", True))
+                        worker["user_agent"] = payload.get("user_agent")
+                        worker["runtime"] = payload.get("runtime") or {}
+                    await websocket.send_json({"type": "worker_ack", "payload": {"worker_id": worker_id, "status": self.status()}})
+                    continue
+                if packet_type in {"inference_result", "inference_error"}:
+                    job_id = str(payload.get("job_id") or "")
+                    future = self._pending.pop(job_id, None)
+                    if future is not None and not future.done():
+                        if packet_type == "inference_error":
+                            payload.setdefault("ok", False)
+                        else:
+                            payload.setdefault("ok", True)
+                        future.set_result(payload)
+                    continue
+        except WebSocketDisconnect:
+            pass
+        finally:
+            self._workers.pop(worker_id, None)
+
+
+phone_inference_hub: Any = PhoneInferenceHub()
+
+
+def write_detection_outputs(
+    raw_path: Path,
+    annotated_path: Path,
+    result_json_path: Path,
+    detections: list[dict[str, Any]],
+) -> None:
+    cv2 = camera_trigger._import_cv2()
+    image = cv2.imread(str(raw_path))
+    if image is None:
+        raise camera_trigger.CameraTriggerError(f"Could not read image for annotation: {raw_path}")
+    for detection in detections:
+        camera_trigger.draw_detection(
+            image,
+            [int(value) for value in detection.get("bbox", [0, 0, 1, 1])],
+            str(detection.get("label") or detection.get("type") or "defect"),
+            float(detection.get("confidence", 0.0)),
+        )
+    annotated_path.parent.mkdir(parents=True, exist_ok=True)
+    result_json_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(annotated_path), image):
+        raise camera_trigger.CameraTriggerError(f"Failed to write annotated image: {annotated_path}")
+    result_json_path.write_text(json.dumps(detections, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _platform_profile(metadata: dict[str, Any]) -> str:
+    profile = str(metadata.get("detection_profile") or metadata.get("profile") or "").strip()
+    if profile:
+        return profile
+    operation_mode = str(metadata.get("operation_mode") or "").strip()
+    return "fast" if operation_mode in {"phone", "simulation", "real"} else "fast"
+
+
+def normalize_detection_platform(value: Any = None) -> str:
+    platform_value = str(value or DEFAULT_DETECTION_PLATFORM).strip().lower()
+    aliases = {
+        "cloud": "huawei_cloud",
+        "huawei": "huawei_cloud",
+        "huawei_cloud": "huawei_cloud",
+        "ecs": "huawei_cloud",
+        "phone": "phone_browser",
+        "mobile": "phone_browser",
+        "phone_browser": "phone_browser",
+        "browser": "phone_browser",
+        "local": "local_dnn",
+        "local_dnn": "local_dnn",
+        "opencv_dnn": "local_dnn",
+        "windows": "local_dnn",
+        "loongson": "local_dnn",
+    }
+    detection_platform = aliases.get(platform_value, platform_value)
+    if detection_platform not in DETECTION_PLATFORMS:
+        raise ValueError("detection_platform must be huawei_cloud, phone_browser, or local_dnn.")
+    return detection_platform
+
+
+def host_platform_label() -> str:
+    system = platform.system()
+    machine = platform.machine()
+    system_lower = system.lower()
+    machine_lower = machine.lower()
+    if "loong" in machine_lower:
+        return "龙芯"
+    if system_lower == "windows":
+        return "Windows"
+    if system_lower == "linux":
+        return "Linux/ECS"
+    return f"{system or 'Local'} {machine}".strip()
+
+
+async def detect_artifact_platform_first(
+    raw_image: str | Path,
+    annotated_path: Path,
+    result_json_path: Path,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_path = camera_trigger.resolve_artifact(raw_image)
+    metadata = dict(metadata or {})
+    detection_platform = normalize_detection_platform(metadata.get("detection_platform"))
+    started = time.perf_counter()
+
+    if detection_platform == "huawei_cloud":
+        try:
+            cloud_result = await asyncio.to_thread(
+                cloud_detection_client.detect_file,
+                raw_path,
+                filename=raw_path.name,
+                profile=_platform_profile(metadata),
+                metadata=metadata,
+            )
+            detections = list(cloud_result.get("defects") or [])
+            write_detection_outputs(raw_path, annotated_path, result_json_path, detections)
+            inference_ms = float(cloud_result.get("inference_ms") or ((time.perf_counter() - started) * 1000.0))
+            return {
+                "ok": True,
+                "defects": detections,
+                "result_json": camera_trigger._rel(result_json_path),
+                "raw_image": camera_trigger._rel(raw_path),
+                "annotated_image": camera_trigger._rel(annotated_path),
+                "inference_ms": round(inference_ms, 2),
+                "inference_location": "huawei_cloud",
+                "detection_platform": "huawei_cloud",
+                "local_fallback": False,
+                "cloud_job_id": cloud_result.get("cloud_job_id") or cloud_result.get("job_id"),
+                "cloud_object_key": cloud_result.get("cloud_object_key") or cloud_result.get("object_key"),
+                "cloud_raw_image_url": cloud_result.get("raw_image_url"),
+                "cloud_annotated_image_url": cloud_result.get("annotated_image_url"),
+                "cloud_result_json_url": cloud_result.get("result_json_url"),
+                "detection_details": cloud_result.get("detection_details") or {},
+            }
+        except CloudDetectionUnavailable as exc:
+            message = str(exc) or "Huawei cloud detection is not configured."
+        except Exception as exc:
+            message = f"Huawei cloud detection failed: {exc}"
+        return {
+            "ok": False,
+            "error": "detection_platform_failed",
+            "message": message,
+            "raw_image": camera_trigger._rel(raw_path),
+            "detection_platform": "huawei_cloud",
+            "inference_location": "huawei_cloud",
+        }
+
+    if detection_platform == "phone_browser":
+        try:
+            if not phone_inference_hub.status().get("ready"):
+                raise PhoneInferenceUnavailable("no_phone_worker_online")
+            phone_result = await phone_inference_hub.detect_artifact(camera_trigger._rel(raw_path), metadata)
+            detections = list(phone_result.get("defects") or [])
+            write_detection_outputs(raw_path, annotated_path, result_json_path, detections)
+            inference_ms = float(phone_result.get("inference_ms") or ((time.perf_counter() - started) * 1000.0))
+            return {
+                "ok": True,
+                "defects": detections,
+                "result_json": camera_trigger._rel(result_json_path),
+                "raw_image": camera_trigger._rel(raw_path),
+                "annotated_image": camera_trigger._rel(annotated_path),
+                "inference_ms": round(inference_ms, 2),
+                "inference_location": "phone_browser",
+                "detection_platform": "phone_browser",
+                "local_fallback": False,
+                "phone_job_id": phone_result.get("job_id"),
+                "detection_details": phone_result.get("detection_details") or {},
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "detection_platform_failed",
+                "message": f"Phone browser detection failed: {exc}",
+                "raw_image": camera_trigger._rel(raw_path),
+                "detection_platform": "phone_browser",
+                "inference_location": "phone_browser",
+            }
+
+    try:
+        return await asyncio.to_thread(local_dnn_detector.detect_image, raw_path, annotated_path, result_json_path)
+    except (LocalDnnError, Exception) as exc:
+        return {
+            "ok": False,
+            "error": "detection_platform_failed",
+            "message": f"Local OpenCV DNN detection failed: {exc}",
+            "raw_image": camera_trigger._rel(raw_path),
+            "detection_platform": "local_dnn",
+            "inference_location": "local_dnn",
+        }
+
+
+detect_artifact_phone_first = detect_artifact_platform_first
+
+
+async def detect_phone_upload_phone_first(
+    upload_id: str,
+    detection_profile: str | None = None,
+    detection_platform: str | None = None,
+) -> dict[str, Any]:
+    profile_config = camera_trigger.phone_detection_profile_config(detection_profile)
+    selected_platform = normalize_detection_platform(detection_platform)
+    metadata = camera_trigger.get_phone_upload(upload_id)
+    raw_path = camera_trigger.resolve_artifact(metadata["raw_image"])
+    upload_dir = raw_path.parent
+    result = await detect_artifact_platform_first(
+        metadata["raw_image"],
+        upload_dir / "annotated.jpg",
+        upload_dir / "result.json",
+        {
+            "operation_mode": "phone",
+            "upload_id": upload_id,
+            "detection_profile": profile_config["profile"],
+            "detection_profile_label": profile_config["label"],
+            "detection_platform": selected_platform,
+        },
+    )
+    if not result.get("ok"):
+        raise camera_trigger.CameraTriggerError(result.get("message") or "Phone upload detection failed.")
+    result["upload_id"] = upload_id
+    result["detection_profile"] = profile_config["profile"]
+    result["detection_profile_label"] = profile_config["label"]
+    result["detection_platform"] = selected_platform
+    result["operation_mode"] = "phone"
+    return camera_trigger.store_phone_detection_result(
+        upload_id,
+        result,
+        profile_config["profile"],
+        profile_config["label"],
+    )
+
+
+async def detect_frame_phone_first(
+    frame: Any,
+    annotated_path: Path,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], Any, float, dict[str, Any]]:
+    cv2 = camera_trigger._import_cv2()
+    raw_path = camera_trigger.CAMERA_OUTPUT_DIR / "phone_worker_frame.jpg"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(raw_path), frame):
+        raise camera_trigger.CameraTriggerError(f"Failed to write phone worker frame: {raw_path}")
+    result = await detect_artifact_phone_first(
+        camera_trigger._rel(raw_path),
+        annotated_path,
+        camera_trigger.VIDEO_LATEST_JSON,
+        metadata or {},
+    )
+    annotated = cv2.imread(str(annotated_path))
+    if annotated is None:
+        annotated = frame.copy()
+    extra = {
+        "inference_location": result.get("inference_location"),
+        "detection_platform": result.get("detection_platform"),
+        "fallback_reason": result.get("fallback_reason"),
+        "cloud_fallback_reason": result.get("cloud_fallback_reason"),
+        "local_fallback": result.get("local_fallback"),
+        "cloud_job_id": result.get("cloud_job_id"),
+        "cloud_annotated_image_url": result.get("cloud_annotated_image_url"),
+        "cloud_result_json_url": result.get("cloud_result_json_url"),
+    }
+    return list(result.get("defects") or []), annotated, float(result.get("inference_ms") or 0.0), extra
 
 
 def file_status(path: Path) -> dict[str, Any]:
@@ -59,6 +450,14 @@ def file_status(path: Path) -> dict[str, Any]:
 
 
 def detect_script_status() -> dict[str, Any]:
+    detector_runtime = camera_trigger.detector_status()
+    if detector_runtime.get("backend") == "onnx_opencv":
+        return {
+            "path": "OpenCV DNN ONNX runtime",
+            "exists": True,
+            "resolved": True,
+            "message": "ONNX mode does not require algorithm/core/detect.py or ultralytics.",
+        }
     try:
         script = camera_trigger.resolve_detect_script()
         status = file_status(script)
@@ -71,6 +470,35 @@ def detect_script_status() -> dict[str, Any]:
             "resolved": False,
             "message": str(exc),
         }
+
+
+def phone_inference_runtime_config() -> dict[str, Any]:
+    try:
+        names, cn_names = camera_trigger.yolo_detector._load_label_maps()
+    except Exception:
+        names = {
+            0: "dry_solder_joint",
+            1: "improper_installation",
+            2: "pcb_damage",
+            3: "short_circuit",
+            4: "insufficient_solder",
+            5: "reverse_component",
+            6: "excess_solder",
+        }
+        cn_names = {}
+    runtime = camera_trigger.detector_status()
+    return {
+        "ok": True,
+        "model_url": "/api/phone-inference/model",
+        "backend": "onnxruntime-web",
+        "imgsz": int(runtime.get("onnx_input_imgsz") or runtime.get("imgsz") or 640),
+        "conf": float(runtime.get("conf") or 0.5),
+        "names": {str(class_id): label for class_id, label in names.items()},
+        "cn_names": cn_names,
+        "weights_exists": bool(camera_trigger.DEFAULT_WEIGHTS.exists()),
+        "weights_size_bytes": camera_trigger.DEFAULT_WEIGHTS.stat().st_size if camera_trigger.DEFAULT_WEIGHTS.exists() else 0,
+        "timeout_seconds": PHONE_WORKER_TIMEOUT_SECONDS,
+    }
 
 
 def system_status(request: Request | None = None) -> dict[str, Any]:
@@ -87,8 +515,12 @@ def system_status(request: Request | None = None) -> dict[str, Any]:
             "interfaces": ["home_all_axes", "move_z_step", "move_to_xy", "move_to_xy_stream"],
         }
 
-    camera_runtime = camera_trigger.camera_status(probe=True)
+    camera_runtime = camera_trigger.camera_status(probe=STATUS_CAMERA_PROBE)
     detector_runtime = camera_trigger.detector_status()
+    cloud_status = cloud_detection_client.status()
+    phone_status = phone_inference_hub.status()
+    local_status = local_dnn_detector.status()
+    host_label = host_platform_label()
     return {
         "motor": motor,
         "camera": {
@@ -98,6 +530,7 @@ def system_status(request: Request | None = None) -> dict[str, Any]:
         },
         "simulation": {
             "import_dir": str(camera_trigger.SIMULATION_IMPORT_DIR),
+            "runtime": camera_trigger.simulation_runtime_config(),
         },
         "algorithm": {
             "detect_script": detect_script_status(),
@@ -106,10 +539,24 @@ def system_status(request: Request | None = None) -> dict[str, Any]:
             "result_json": file_status(camera_trigger.RESULT_JSON),
             "runtime": detector_runtime,
         },
+        "cloud_detection": cloud_status,
+        "detection_priority": [DEFAULT_DETECTION_PLATFORM],
+        "phone_inference": phone_status,
+        "detection_platforms": {
+            "default": DEFAULT_DETECTION_PLATFORM,
+            "options": ["huawei_cloud", "phone_browser", "local_dnn"],
+            "host_label": host_label,
+            "edge_safe_mode": EDGE_SAFE_MODE,
+            "status_camera_probe": STATUS_CAMERA_PROBE,
+            "huawei_cloud": cloud_status,
+            "phone_browser": phone_status,
+            "local_dnn": local_status,
+        },
+        "llm_report": llm_reporter.status(),
         "scan": {
             "running": scan_running,
-            "modes": ["handheld", "simulation", "real", "video", "phone"],
-            "mode_hint": "handheld uses the real camera without slide motion; simulation uses an uploaded image; real uses stop-and-shoot slide motion; video uses continuous raster motion and live YOLO inference; phone uses LAN image upload and whole-image YOLO.",
+            "modes": ["simulation", "real", "phone"],
+            "mode_hint": "simulation uses an uploaded image; real uses stop-and-shoot slide motion and camera capture; phone uses LAN image upload and whole-image detection.",
             "video": camera_trigger.video_status(),
         },
         "network": network_status(request),
@@ -389,6 +836,7 @@ async def run_scan(
     image_path: str | None,
     capture_mode: str,
     operation_mode: str,
+    detection_platform: str,
     stop_event: asyncio.Event,
 ) -> None:
     cells = iter_snake_cells(plan)
@@ -397,6 +845,7 @@ async def run_scan(
 
     plan_payload = dict(plan)
     plan_payload["operation_mode"] = operation_mode
+    plan_payload["detection_platform"] = detection_platform
     await send_packet(websocket, "grid_plan", plan_payload, scan_id)
     manifest_cells: dict[str, dict[str, Any]] = {}
 
@@ -580,49 +1029,45 @@ async def run_scan(
                 )
                 return
 
-            if operation_mode == "simulation":
-                result = {
-                    "ok": True,
+            await send_packet(
+                websocket,
+                "scan_phase",
+                {
+                "phase": "detect_inference",
+                "row": row,
+                "col": col,
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "raw_image": capture.get("raw_image"),
+                "capture_ms": capture.get("capture_ms"),
+                "source": capture_source,
+                "detection_platform": detection_platform,
+            },
+            scan_id,
+        )
+            result = await detect_artifact_phone_first(
+                capture["raw_image"],
+                camera_trigger.SCAN_OUTPUT_DIR / scan_id / f"r{row:03d}_c{col:03d}" / "annotated.jpg",
+                camera_trigger.SCAN_OUTPUT_DIR / scan_id / f"r{row:03d}_c{col:03d}" / "result.json",
+                {
+                    "operation_mode": operation_mode,
+                    "scan_id": scan_id,
                     "row": row,
                     "col": col,
                     "x_mm": x_mm,
                     "y_mm": y_mm,
-                    "raw_image": capture.get("raw_image"),
-                    "annotated_image": capture.get("raw_image"),
-                    "result_json": capture.get("result_json"),
-                    "defects": [],
-                    "capture_ms": capture.get("capture_ms"),
-                    "inference_ms": None,
-                    "source_image": capture.get("source_image"),
-                    "simulation_crop": capture.get("simulation_crop"),
-                }
-            else:
-                await send_packet(
-                    websocket,
-                    "scan_phase",
-                    {
-                        "phase": "detect_inference",
-                        "row": row,
-                        "col": col,
-                        "x_mm": x_mm,
-                        "y_mm": y_mm,
-                        "raw_image": capture.get("raw_image"),
-                        "capture_ms": capture.get("capture_ms"),
-                        "source": capture_source,
-                    },
-                    scan_id,
-                )
-                result = await camera_trigger.detect_captured_frame(
-                    row,
-                    col,
-                    x_mm,
-                    y_mm,
-                    scan_id,
-                    capture["raw_image"],
-                    stop_event,
-                )
-                if result.get("ok"):
-                    result["capture_ms"] = capture.get("capture_ms")
+                    "capture_source": capture_source,
+                    "detection_platform": detection_platform,
+                },
+            )
+            if result.get("ok"):
+                result["row"] = row
+                result["col"] = col
+                result["x_mm"] = x_mm
+                result["y_mm"] = y_mm
+                result["capture_ms"] = capture.get("capture_ms")
+                result["source_image"] = capture.get("source_image")
+                result["simulation_crop"] = capture.get("simulation_crop")
 
         if not result.get("ok"):
             update_manifest_cell(
@@ -653,6 +1098,15 @@ async def run_scan(
                 "defects": result.get("defects", []),
                 "capture_ms": result.get("capture_ms"),
                 "inference_ms": result.get("inference_ms"),
+                "inference_location": result.get("inference_location"),
+                "detection_platform": result.get("detection_platform"),
+                "platform_priority": result.get("platform_priority"),
+                "fallback_reason": result.get("fallback_reason"),
+                "cloud_fallback_reason": result.get("cloud_fallback_reason"),
+                "local_fallback": result.get("local_fallback"),
+                "cloud_job_id": result.get("cloud_job_id"),
+                "cloud_annotated_image_url": result.get("cloud_annotated_image_url"),
+                "cloud_result_json_url": result.get("cloud_result_json_url"),
                 "source_image": result.get("source_image"),
                 "simulation_crop": result.get("simulation_crop"),
             },
@@ -674,6 +1128,15 @@ async def run_scan(
                 "annotated_image": result.get("annotated_image"),
                 "capture_ms": result.get("capture_ms"),
                 "inference_ms": result.get("inference_ms"),
+                "inference_location": result.get("inference_location"),
+                "detection_platform": result.get("detection_platform"),
+                "platform_priority": result.get("platform_priority"),
+                "fallback_reason": result.get("fallback_reason"),
+                "cloud_fallback_reason": result.get("cloud_fallback_reason"),
+                "local_fallback": result.get("local_fallback"),
+                "cloud_job_id": result.get("cloud_job_id"),
+                "cloud_annotated_image_url": result.get("cloud_annotated_image_url"),
+                "cloud_result_json_url": result.get("cloud_result_json_url"),
                 "source_image": result.get("source_image"),
                 "simulation_crop": result.get("simulation_crop"),
                 "operation_mode": operation_mode,
@@ -688,13 +1151,14 @@ async def run_scan(
         websocket,
         "scan_phase",
         {
-            "phase": "return_origin",
-            "x_mm": origin_x_mm,
-            "y_mm": origin_y_mm,
-            "operation_mode": operation_mode,
-            "motion": "physical" if motion_enabled else "simulated",
-        },
-        scan_id,
+                "phase": "return_origin",
+                "x_mm": origin_x_mm,
+                "y_mm": origin_y_mm,
+                "operation_mode": operation_mode,
+                "detection_platform": detection_platform,
+                "motion": "physical" if motion_enabled else "simulated",
+            },
+            scan_id,
     )
     if motion_enabled:
         try:
@@ -728,7 +1192,33 @@ async def run_scan(
             scan_id,
         )
         try:
-            mosaic_payload = await asyncio.to_thread(camera_trigger.build_scan_mosaic, scan_id, True)
+            mosaic_payload = await asyncio.to_thread(camera_trigger.build_scan_mosaic, scan_id, False)
+            mosaic_dir = camera_trigger.SCAN_OUTPUT_DIR / scan_id / "mosaic"
+            mosaic_detection = await detect_artifact_phone_first(
+                mosaic_payload["mosaic_raw"],
+                mosaic_dir / "mosaic_annotated.jpg",
+                mosaic_dir / "mosaic_result.json",
+                {
+                    "operation_mode": operation_mode,
+                    "scan_id": scan_id,
+                    "phase": "mosaic_detecting",
+                    "detection_platform": detection_platform,
+                },
+            )
+            if mosaic_detection.get("ok"):
+                mosaic_payload["defects"] = mosaic_detection.get("defects", [])
+                mosaic_payload["mosaic_annotated"] = mosaic_detection.get("annotated_image")
+                mosaic_payload["mosaic_result_json"] = mosaic_detection.get("result_json")
+                mosaic_payload["inference_ms"] = mosaic_detection.get("inference_ms")
+                mosaic_payload["inference_location"] = mosaic_detection.get("inference_location")
+                mosaic_payload["detection_platform"] = mosaic_detection.get("detection_platform")
+                mosaic_payload["platform_priority"] = mosaic_detection.get("platform_priority")
+                mosaic_payload["fallback_reason"] = mosaic_detection.get("fallback_reason")
+                mosaic_payload["cloud_fallback_reason"] = mosaic_detection.get("cloud_fallback_reason")
+                mosaic_payload["local_fallback"] = mosaic_detection.get("local_fallback")
+                mosaic_payload["cloud_job_id"] = mosaic_detection.get("cloud_job_id")
+                mosaic_payload["cloud_annotated_image_url"] = mosaic_detection.get("cloud_annotated_image_url")
+                mosaic_payload["cloud_result_json_url"] = mosaic_detection.get("cloud_result_json_url")
             camera_trigger.write_scan_manifest(
                 scan_id,
                 plan_payload,
@@ -765,6 +1255,7 @@ async def run_scan(
             "returned_to_origin": True,
             "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
             "operation_mode": operation_mode,
+            "detection_platform": detection_platform,
             "return_motion": "physical" if motion_enabled else "simulated",
             "mosaic": mosaic_payload,
         },
@@ -850,6 +1341,11 @@ async def run_video_scan(
             stop_event,
             inference_fps=float(plan["inference_fps"]),
             preview_fps=float(plan["preview_fps"]),
+            inference_handler=lambda frame, annotated_path: detect_frame_phone_first(
+                frame,
+                annotated_path,
+                {"operation_mode": "video", "scan_id": scan_id},
+            ),
             on_detection=on_detection,
             on_error=on_detection_error,
         )
@@ -1013,6 +1509,11 @@ async def run_handheld_detection(
             stop_event,
             inference_fps=inference_fps,
             preview_fps=preview_fps,
+            inference_handler=lambda frame, annotated_path: detect_frame_phone_first(
+                frame,
+                annotated_path,
+                {"operation_mode": "handheld", "scan_id": scan_id},
+            ),
             on_detection=on_detection,
             on_error=on_detection_error,
         )
@@ -1033,13 +1534,16 @@ async def run_phone_detection(
     upload_id: str,
     stop_event: asyncio.Event,
     detection_profile: str = "fast",
+    detection_platform: str = DEFAULT_DETECTION_PLATFORM,
 ) -> None:
     try:
         profile_config = camera_trigger.phone_detection_profile_config(detection_profile)
+        detection_platform = normalize_detection_platform(detection_platform)
         selected = await asyncio.to_thread(camera_trigger.get_phone_upload, upload_id)
         selected["operation_mode"] = "phone"
         selected["detection_profile"] = profile_config["profile"]
         selected["detection_profile_label"] = profile_config["label"]
+        selected["detection_platform"] = detection_platform
         await send_packet(websocket, "phone_upload_selected", selected, scan_id)
         if stop_event.is_set():
             await send_packet(
@@ -1058,12 +1562,14 @@ async def run_phone_detection(
                 "operation_mode": "phone",
                 "detection_profile": profile_config["profile"],
                 "detection_profile_label": profile_config["label"],
+                "detection_platform": detection_platform,
                 "message": f"Running whole-image YOLO inference ({profile_config['label']}).",
             },
             scan_id,
         )
-        result = await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id, profile_config["profile"])
+        result = await detect_phone_upload_phone_first(upload_id, profile_config["profile"], detection_platform)
         result["operation_mode"] = "phone"
+        result["detection_platform"] = detection_platform
         await send_packet(websocket, "phone_result", result, scan_id)
     except Exception as exc:
         await send_packet(
@@ -1121,18 +1627,14 @@ def normalize_operation_mode(payload: dict[str, Any]) -> tuple[str, str]:
     capture_mode = str(payload.get("capture_mode", "")).strip().lower()
     operation_mode = str(payload.get("operation_mode", "")).strip().lower()
     aliases = {
-        "camera": "handheld",
-        "virtual": "handheld",
-        "mock_camera": "handheld",
-        "handheld": "handheld",
-        "handheld_detection": "handheld",
+        "camera": "real",
+        "virtual": "mock",
+        "mock_camera": "mock",
         "simulation": "simulation",
         "simulate": "simulation",
         "image": "simulation",
         "real": "real",
         "hardware": "real",
-        "video": "video",
-        "video_detection": "video",
         "phone": "phone",
         "mobile": "phone",
         "mobile_upload": "phone",
@@ -1143,11 +1645,11 @@ def normalize_operation_mode(payload: dict[str, Any]) -> tuple[str, str]:
         operation_mode = "mock" if capture_mode == "mock" else "real"
     operation_mode = aliases.get(operation_mode, operation_mode)
     if operation_mode not in OPERATION_MODES:
-        raise ValueError("operation_mode must be handheld, simulation, real, video, phone, or mock.")
+        raise ValueError("operation_mode must be simulation, real, phone, or mock.")
 
     if capture_mode not in {"mock", "real"}:
         capture_mode = "mock" if operation_mode == "mock" else "real"
-    if operation_mode in {"handheld", "simulation", "real", "phone"}:
+    if operation_mode in {"simulation", "real", "phone"}:
         capture_mode = "real"
     return operation_mode, capture_mode
 
@@ -1178,8 +1680,20 @@ async def api_system_status(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/camera/status")
-async def api_camera_status(probe: bool = Query(True)) -> dict[str, Any]:
+async def api_camera_status(probe: bool = Query(False)) -> dict[str, Any]:
     return camera_trigger.camera_status(probe=probe)
+
+
+@app.post("/api/camera/source")
+async def api_camera_source(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+    try:
+        return camera_trigger.set_camera_source(str(payload.get("source", "")))
+    except camera_trigger.CameraTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/camera/stream.mjpg")
@@ -1201,6 +1715,23 @@ async def api_video_stream() -> StreamingResponse:
         camera_trigger.stream_video_mjpeg(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.get("/api/phone-inference/status")
+async def api_phone_inference_status() -> dict[str, Any]:
+    return {"ok": True, **phone_inference_hub.status()}
+
+
+@app.get("/api/phone-inference/runtime")
+async def api_phone_inference_runtime() -> dict[str, Any]:
+    return phone_inference_runtime_config()
+
+
+@app.get("/api/phone-inference/model")
+async def api_phone_inference_model() -> FileResponse:
+    if not camera_trigger.DEFAULT_WEIGHTS.exists():
+        raise HTTPException(status_code=404, detail=f"ONNX model not found: {camera_trigger.DEFAULT_WEIGHTS}")
+    return FileResponse(camera_trigger.DEFAULT_WEIGHTS, media_type="application/octet-stream", filename="best.onnx")
 
 
 @app.post("/api/simulation/upload")
@@ -1243,8 +1774,24 @@ async def api_phone_detect(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="upload_id is required.")
     detection_profile = str(payload.get("detection_profile") or payload.get("profile") or "fast").strip()
     try:
-        return await asyncio.to_thread(camera_trigger.detect_phone_upload, upload_id, detection_profile)
+        detection_platform = normalize_detection_platform(payload.get("detection_platform"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return await detect_phone_upload_phone_first(upload_id, detection_profile, detection_platform)
     except camera_trigger.CameraTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/llm/report")
+async def api_llm_report(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+    try:
+        return await asyncio.to_thread(llm_reporter.generate_report, payload)
+    except llm_reporter.LlmReportError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -1268,6 +1815,11 @@ async def api_artifact(path: str = Query(...)) -> FileResponse:
 @app.get("/api/network/status")
 async def api_network_status(request: Request) -> dict[str, Any]:
     return network_status(request)
+
+
+@app.websocket("/ws/phone-inference")
+async def phone_inference_ws(websocket: WebSocket) -> None:
+    await phone_inference_hub.connect(websocket)
 
 
 @app.get("/api/grid/preview")
@@ -1352,38 +1904,12 @@ async def websocket_control(websocket: WebSocket) -> None:
                 continue
 
             if packet_type == "start_handheld_detection":
-                if scan_lock.locked() or (active_scan_task and not active_scan_task.done()):
-                    await send_packet(websocket, "handheld_error", {"request_id": request_id, "message": "Another scan is already running."})
-                    continue
-
-                try:
-                    inference_fps = float(payload.get("inference_fps", VIDEO_INFERENCE_FPS))
-                    preview_fps = float(payload.get("preview_fps", VIDEO_PREVIEW_FPS))
-                except (TypeError, ValueError) as exc:
-                    await send_packet(websocket, "handheld_error", {"request_id": request_id, "message": str(exc)})
-                    continue
-
-                scan_id = str(uuid.uuid4())
-                stop_event = asyncio.Event()
-                active_stop_event = stop_event
-
-                async def locked_handheld_detection() -> None:
-                    global active_stop_event
-                    async with scan_lock:
-                        try:
-                            await run_handheld_detection(websocket, scan_id, stop_event, inference_fps, preview_fps)
-                        finally:
-                            active_stop_event = None
-
-                active_scan_task = asyncio.create_task(locked_handheld_detection())
                 await send_packet(
                     websocket,
-                    "ack",
+                    "handheld_error",
                     {
                         "request_id": request_id,
-                        "scan_id": scan_id,
-                        "operation_mode": "handheld",
-                        "message": "start_handheld_detection accepted.",
+                        "message": "手持实时检测模式已移除；请使用手机拍照模式或真实模式相机预览。",
                     },
                 )
                 continue
@@ -1398,6 +1924,11 @@ async def websocket_control(websocket: WebSocket) -> None:
                     await send_packet(websocket, "phone_error", {"request_id": request_id, "message": "upload_id is required."})
                     continue
                 detection_profile = str(payload.get("detection_profile") or payload.get("profile") or "fast").strip()
+                try:
+                    detection_platform = normalize_detection_platform(payload.get("detection_platform"))
+                except ValueError as exc:
+                    await send_packet(websocket, "phone_error", {"request_id": request_id, "message": str(exc)})
+                    continue
 
                 scan_id = str(uuid.uuid4())
                 stop_event = asyncio.Event()
@@ -1407,7 +1938,14 @@ async def websocket_control(websocket: WebSocket) -> None:
                     global active_stop_event
                     async with scan_lock:
                         try:
-                            await run_phone_detection(websocket, scan_id, upload_id, stop_event, detection_profile)
+                            await run_phone_detection(
+                                websocket,
+                                scan_id,
+                                upload_id,
+                                stop_event,
+                                detection_profile,
+                                detection_platform,
+                            )
                         finally:
                             active_stop_event = None
 
@@ -1419,48 +1957,19 @@ async def websocket_control(websocket: WebSocket) -> None:
                         "request_id": request_id,
                         "scan_id": scan_id,
                         "operation_mode": "phone",
+                        "detection_platform": detection_platform,
                         "message": "start_phone_detection accepted.",
                     },
                 )
                 continue
 
             if packet_type == "start_video_scan":
-                if scan_lock.locked() or (active_scan_task and not active_scan_task.done()):
-                    await send_packet(websocket, "video_error", {"request_id": request_id, "message": "Another scan is already running."})
-                    continue
-
-                try:
-                    plan = build_video_plan(
-                        float(payload.get("speed_mm_s", VIDEO_SPEED_MM_S)),
-                        float(payload.get("inference_fps", VIDEO_INFERENCE_FPS)),
-                        float(payload.get("preview_fps", VIDEO_PREVIEW_FPS)),
-                        float(payload.get("overlap", VIDEO_OVERLAP)),
-                    )
-                except (TypeError, ValueError) as exc:
-                    await send_packet(websocket, "video_error", {"request_id": request_id, "message": str(exc)})
-                    continue
-
-                scan_id = str(uuid.uuid4())
-                stop_event = asyncio.Event()
-                active_stop_event = stop_event
-
-                async def locked_video_scan() -> None:
-                    global active_stop_event
-                    async with scan_lock:
-                        try:
-                            await run_video_scan(websocket, scan_id, plan, stop_event)
-                        finally:
-                            active_stop_event = None
-
-                active_scan_task = asyncio.create_task(locked_video_scan())
                 await send_packet(
                     websocket,
-                    "ack",
+                    "video_error",
                     {
                         "request_id": request_id,
-                        "scan_id": scan_id,
-                        "operation_mode": "video",
-                        "message": "start_video_scan accepted.",
+                        "message": "连续视频检测模式已从 UI 主流程移除；真实模式仍保留实时相机预览。",
                     },
                 )
                 continue
@@ -1478,12 +1987,9 @@ async def websocket_control(websocket: WebSocket) -> None:
                         float(payload.get("origin_y_mm", 0.0)),
                     )
                     operation_mode, capture_mode = normalize_operation_mode(payload)
-                    if operation_mode == "video":
-                        raise ValueError("Use start_video_scan for continuous video detection mode.")
-                    if operation_mode == "handheld":
-                        raise ValueError("Use start_handheld_detection for handheld realtime detection mode.")
                     if operation_mode == "phone":
                         raise ValueError("Use start_phone_detection for phone upload detection mode.")
+                    detection_platform = normalize_detection_platform(payload.get("detection_platform"))
                 except (KeyError, TypeError, ValueError) as exc:
                     await send_packet(websocket, "scan_error", {"request_id": request_id, "message": str(exc)})
                     continue
@@ -1504,6 +2010,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                                 image_path,
                                 capture_mode,
                                 operation_mode,
+                                detection_platform,
                                 stop_event,
                             )
                         finally:
@@ -1517,6 +2024,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                         "request_id": request_id,
                         "scan_id": scan_id,
                         "operation_mode": operation_mode,
+                        "detection_platform": detection_platform,
                         "message": "start_scan accepted.",
                     },
                 )
