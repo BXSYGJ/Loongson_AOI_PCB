@@ -13,6 +13,7 @@ unless the machine is later changed to two independent Y-axis drivers.
 | File | Purpose |
 | --- | --- |
 | `motor_controller.py` | TB6600 step/direction control, soft home, optional limit-switch home, bounded XY/Z movement, continuous scan movement |
+| `motor_test.py` | Standalone slide movement plus camera capture smoke test |
 
 ## Public Python API
 
@@ -36,14 +37,14 @@ All distances are in millimetres.
 | XYZ travel | `135 mm` |
 | Lead screw | `8 mm / rev` |
 | Stepper angle | `1.8 deg`, `200 steps / rev` |
-| TB6600 microstep | `16` |
-| Pulse density | `400 pulses / mm` |
+| TB6600 microstep | `1` |
+| Pulse density | `25 pulses / mm` |
 
 Default GPIO line offsets:
 
 | Axis | DIR | STEP |
 | --- | ---: | ---: |
-| X | `4` | `7` |
+| X | `57` | `59` |
 | Y | `3` | `60` |
 | Z | `1` | `2` |
 
@@ -97,11 +98,11 @@ $env:LOONGSON_AOI_MOTOR_STATE = "D:\AAAED\code\Loongson_AOI_PCB\worktrees\hardwa
 Motion tuning:
 
 ```powershell
-$env:LOONGSON_AOI_MICROSTEP = "16"
+$env:LOONGSON_AOI_MICROSTEP = "1"
 $env:LOONGSON_AOI_LEAD_MM = "8"
 $env:LOONGSON_AOI_MAX_SPEED_MM_S = "3"
 $env:LOONGSON_AOI_START_SPEED_MM_S = "0.8"
-$env:LOONGSON_AOI_PULSE_WIDTH_US = "500"
+$env:LOONGSON_AOI_PULSE_WIDTH_US = "5000"
 $env:LOONGSON_AOI_RAMP_FRACTION = "0.15"
 ```
 
@@ -116,12 +117,33 @@ $env:LOONGSON_AOI_Z_MAX_MM = "135"
 Per-axis GPIO override:
 
 ```powershell
-$env:LOONGSON_AOI_X_DIR_OFFSET = "4"
-$env:LOONGSON_AOI_X_STEP_OFFSET = "7"
+$env:LOONGSON_AOI_X_DIR_OFFSET = "57"
+$env:LOONGSON_AOI_X_STEP_OFFSET = "59"
 $env:LOONGSON_AOI_Y_DIR_OFFSET = "3"
 $env:LOONGSON_AOI_Y_STEP_OFFSET = "60"
 $env:LOONGSON_AOI_Z_DIR_OFFSET = "1"
 $env:LOONGSON_AOI_Z_STEP_OFFSET = "2"
+```
+
+## Motor and Camera Smoke Test
+
+`motor_test.py` moves through the teammate-provided XY points, waits for the
+stage to stabilize, and saves one camera image per point.
+
+```powershell
+python .\motor_test.py --camera-source 1 --camera-backend DSHOW --soft-home
+```
+
+On the Loongson board, use the V4L2 source:
+
+```powershell
+python .\motor_test.py --camera-source /dev/video0 --soft-home
+```
+
+The point list can be overridden without editing code:
+
+```powershell
+$env:LOONGSON_AOI_MOTOR_TEST_POINTS = "0,0;16,8;16,40;32,8;32,40;0,0"
 ```
 
 Optional future dual-Y independent driver:
