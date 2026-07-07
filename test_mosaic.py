@@ -25,6 +25,204 @@ def remove_tree_retry(path: Path) -> None:
 
 
 class ScanMosaicTests(unittest.TestCase):
+    def test_real_fixed16_scan_captures_origin_before_first_motion_and_uses_speed(self):
+        scan_id = f"unit-real-first-capture-{uuid.uuid4().hex[:8]}"
+        plan = main.build_fixed_16_scan_plan(origin_x_mm=0.0, origin_y_mm=0.0)
+        plan["motion_speed_mm_s"] = 7.5
+        plan["settle_seconds"] = 0.0
+        events: list[str] = []
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.packets = []
+
+            async def send_json(self, packet):
+                self.packets.append(packet)
+
+        async def fake_capture(row, col, x, y, scan_id_arg, stop_event):
+            events.append(f"capture:{row}:{col}")
+            return {
+                "ok": True,
+                "row": row,
+                "col": col,
+                "x_mm": x,
+                "y_mm": y,
+                "raw_image": f"algorithm/outputs/scans/{scan_id_arg}/r{row:03d}_c{col:03d}/raw.jpg",
+                "latest_image": "algorithm/outputs/camera/latest.jpg",
+                "capture_ms": 1.0,
+            }
+
+        async def fake_detect(raw_image, annotated_path, result_json_path, metadata):
+            events.append(f"detect:{metadata['row']}:{metadata['col']}")
+            return {
+                "ok": True,
+                "defects": [],
+                "result_json": str(result_json_path),
+                "raw_image": raw_image,
+                "annotated_image": str(annotated_path),
+                "inference_ms": 2.0,
+                "inference_location": "local_dnn",
+                "detection_platform": "local_dnn",
+            }
+
+        def fake_move_to_xy(x, y):
+            events.append(f"legacy_move:{x}:{y}")
+            return {"x_mm": x, "y_mm": y, "z_mm": 0.0}
+
+        def fake_move_to_xy_stream(x, y, speed_mm_s=2.0, *args, **kwargs):
+            if float(x) == 0.0 and float(y) == 0.0:
+                events.append(f"return_origin:speed={speed_mm_s}")
+            else:
+                events.append(f"move:{x}:{y}:speed={speed_mm_s}")
+            return {"x_mm": x, "y_mm": y, "z_mm": 0.0}
+
+        original_capture = camera_trigger.capture_frame
+        original_detect = main.detect_artifact_phone_first
+        original_move = main.motor_controller.move_to_xy
+        original_stream = main.motor_controller.move_to_xy_stream
+        original_mosaic = camera_trigger.build_scan_mosaic
+        try:
+            camera_trigger.capture_frame = fake_capture
+            main.detect_artifact_phone_first = fake_detect
+            main.motor_controller.move_to_xy = fake_move_to_xy
+            main.motor_controller.move_to_xy_stream = fake_move_to_xy_stream
+            def fake_mosaic(scan_id_arg, run_detection=False):
+                events.append("mosaic")
+                return {
+                    "ok": True,
+                    "scan_id": scan_id_arg,
+                    "cell_count": 16,
+                    "mosaic_raw": "algorithm/outputs/scans/unit/mosaic/mosaic_raw.jpg",
+                    "mosaic_annotated": "algorithm/outputs/scans/unit/mosaic/mosaic_raw.jpg",
+                    "mosaic_result_json": "algorithm/outputs/scans/unit/mosaic/mosaic_result.json",
+                    "defects": [],
+                }
+
+            camera_trigger.build_scan_mosaic = fake_mosaic
+
+            websocket = FakeWebSocket()
+            asyncio.run(
+                main.run_scan(
+                    websocket,
+                    scan_id,
+                    plan,
+                    None,
+                    "real",
+                    "real",
+                    "local_dnn",
+                    asyncio.Event(),
+                )
+            )
+
+            self.assertEqual(events[0], "capture:0:0")
+            self.assertNotIn("legacy_move:0.0:0.0", events)
+            self.assertEqual(sum(1 for event in events if event.startswith("capture:")), 16)
+            self.assertIn("mosaic", events)
+            self.assertGreater(events.index("mosaic"), max(index for index, event in enumerate(events) if event.startswith("capture:")))
+            return_events = [index for index, event in enumerate(events) if event.startswith("return_origin:")]
+            self.assertEqual(len(return_events), 1)
+            self.assertLess(events.index("mosaic"), return_events[0])
+            move_events = [event for event in events if event.startswith("move:")]
+            self.assertTrue(move_events)
+            self.assertTrue(all(event.endswith("speed=7.5") for event in move_events))
+        finally:
+            camera_trigger.capture_frame = original_capture
+            main.detect_artifact_phone_first = original_detect
+            main.motor_controller.move_to_xy = original_move
+            main.motor_controller.move_to_xy_stream = original_stream
+            camera_trigger.build_scan_mosaic = original_mosaic
+
+    def test_real_scan_moves_while_previous_detection_is_pending(self):
+        scan_id = f"unit-real-detect-queue-{uuid.uuid4().hex[:8]}"
+        plan = main.build_fixed_16_scan_plan(origin_x_mm=0.0, origin_y_mm=0.0)
+        plan["motion_speed_mm_s"] = 5.0
+        plan["settle_seconds"] = 0.0
+        events: list[str] = []
+
+        class FakeWebSocket:
+            async def send_json(self, packet):
+                pass
+
+        async def fake_capture(row, col, x, y, scan_id_arg, stop_event):
+            events.append(f"capture:{row}:{col}")
+            return {
+                "ok": True,
+                "row": row,
+                "col": col,
+                "x_mm": x,
+                "y_mm": y,
+                "raw_image": f"algorithm/outputs/scans/{scan_id_arg}/r{row:03d}_c{col:03d}/raw.jpg",
+                "latest_image": "algorithm/outputs/camera/latest.jpg",
+                "capture_ms": 1.0,
+            }
+
+        async def fake_detect(raw_image, annotated_path, result_json_path, metadata):
+            events.append(f"detect_start:{metadata['row']}:{metadata['col']}")
+            await asyncio.sleep(0.05)
+            events.append(f"detect_end:{metadata['row']}:{metadata['col']}")
+            return {
+                "ok": True,
+                "defects": [],
+                "result_json": str(result_json_path),
+                "raw_image": raw_image,
+                "annotated_image": str(annotated_path),
+                "inference_ms": 50.0,
+                "inference_location": "local_dnn",
+                "detection_platform": "local_dnn",
+            }
+
+        def fake_move_to_xy_stream(x, y, speed_mm_s=2.0, *args, **kwargs):
+            events.append(f"move:{x}:{y}:speed={speed_mm_s}")
+            return {"x_mm": x, "y_mm": y, "z_mm": 0.0}
+
+        def fake_legacy_move_to_xy(x, y):
+            events.append(f"legacy_move:{x}:{y}")
+            return {"x_mm": x, "y_mm": y, "z_mm": 0.0}
+
+        original_capture = camera_trigger.capture_frame
+        original_detect = main.detect_artifact_phone_first
+        original_move = main.motor_controller.move_to_xy
+        original_stream = main.motor_controller.move_to_xy_stream
+        original_mosaic = camera_trigger.build_scan_mosaic
+        try:
+            camera_trigger.capture_frame = fake_capture
+            main.detect_artifact_phone_first = fake_detect
+            main.motor_controller.move_to_xy = fake_legacy_move_to_xy
+            main.motor_controller.move_to_xy_stream = fake_move_to_xy_stream
+            camera_trigger.build_scan_mosaic = lambda scan_id_arg, run_detection=False: {
+                "ok": True,
+                "scan_id": scan_id_arg,
+                "cell_count": 16,
+                "mosaic_raw": "algorithm/outputs/scans/unit/mosaic/mosaic_raw.jpg",
+                "mosaic_annotated": "algorithm/outputs/scans/unit/mosaic/mosaic_raw.jpg",
+                "mosaic_result_json": "algorithm/outputs/scans/unit/mosaic/mosaic_result.json",
+                "defects": [],
+            }
+
+            asyncio.run(
+                main.run_scan(
+                    FakeWebSocket(),
+                    scan_id,
+                    plan,
+                    None,
+                    "real",
+                    "real",
+                    "local_dnn",
+                    asyncio.Event(),
+                )
+            )
+
+            first_detect_end = events.index("detect_end:0:0")
+            first_motion = next(index for index, event in enumerate(events) if event.startswith("move:"))
+            self.assertLess(first_motion, first_detect_end)
+            self.assertEqual(sum(1 for event in events if event.startswith("detect_end:")), 16)
+        finally:
+            camera_trigger.capture_frame = original_capture
+            main.detect_artifact_phone_first = original_detect
+            main.motor_controller.move_to_xy = original_move
+            main.motor_controller.move_to_xy_stream = original_stream
+            camera_trigger.build_scan_mosaic = original_mosaic
+
     def test_onnx_detector_maps_letterboxed_boxes_to_original_image(self):
         class FakeOnnxNet:
             def __init__(self, output):
@@ -81,6 +279,176 @@ class ScanMosaicTests(unittest.TestCase):
         self.assertEqual((cells[0]["row"], cells[0]["col"], cells[0]["x_mm"], cells[0]["y_mm"]), (0, 0, 0.0, 0.0))
         self.assertEqual((cells[1]["row"], cells[1]["col"], cells[1]["x_mm"], cells[1]["y_mm"]), (0, 1, 24.0, 0.0))
         self.assertEqual((cells[3]["row"], cells[3]["col"], cells[3]["x_mm"], cells[3]["y_mm"]), (1, 2, 48.0, 24.0))
+
+    def test_fixed_real_scan_plan_uses_teammate_16_points(self):
+        plan = main.build_fixed_16_scan_plan(origin_x_mm=0.0, origin_y_mm=0.0)
+
+        self.assertEqual(plan["scan_type"], "fixed_points_16")
+        self.assertFalse(plan["pcb_size_known"])
+        self.assertEqual(plan["rows"], 4)
+        self.assertEqual(plan["cols"], 4)
+        self.assertEqual(plan["total_cells"], 16)
+        self.assertEqual(plan["image_px"], {"width": 1280, "height": 800})
+        self.assertEqual(plan["step_mm"], {"x": 16.0, "y": 24.0})
+        self.assertEqual(plan["mosaic_mode"], "auto_crop_overlap")
+
+        cells = main.iter_snake_cells(plan)
+        self.assertEqual(len(cells), 16)
+        self.assertEqual((cells[0]["row"], cells[0]["col"], cells[0]["x_mm"], cells[0]["y_mm"]), (0, 0, 0.0, 0.0))
+        self.assertEqual((cells[1]["row"], cells[1]["col"], cells[1]["x_mm"], cells[1]["y_mm"]), (1, 0, 0.0, 24.0))
+        self.assertEqual((cells[4]["row"], cells[4]["col"], cells[4]["x_mm"], cells[4]["y_mm"]), (0, 1, 16.0, 0.0))
+        self.assertEqual((cells[-1]["row"], cells[-1]["col"], cells[-1]["x_mm"], cells[-1]["y_mm"]), (3, 3, 48.0, 72.0))
+
+    def test_real_scan_settle_seconds_can_be_overridden_from_payload(self):
+        plan = main.build_fixed_16_scan_plan(origin_x_mm=0.0, origin_y_mm=0.0)
+        plan["settle_seconds"] = main.normalize_settle_seconds(0.12)
+
+        self.assertEqual(plan["settle_seconds"], 0.12)
+        self.assertEqual(main.normalize_settle_seconds("0.03"), 0.03)
+        with self.assertRaises(ValueError):
+            main.normalize_settle_seconds("-0.1")
+
+    def test_auto_crop_mosaic_estimates_pixel_stride_for_unknown_pcb_size(self):
+        scan_id = f"unit-fixed-auto-{uuid.uuid4().hex[:8]}"
+        scan_dir = camera_trigger.SCAN_OUTPUT_DIR / scan_id
+        if scan_dir.exists():
+            remove_tree_retry(scan_dir)
+
+        try:
+            tile_width = 80
+            tile_height = 50
+            step_x_px = 20
+            step_y_px = 15
+            canvas_width = tile_width + step_x_px
+            canvas_height = tile_height + step_y_px
+            yy, xx = np.indices((canvas_height, canvas_width))
+            base = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
+            base[:, :, 0] = (xx * 7 + yy * 3) % 251
+            base[:, :, 1] = (xx * 5 + 40) % 251
+            base[:, :, 2] = (yy * 11 + 80) % 251
+
+            cells = []
+            for row, col, x_mm, y_mm in [
+                (0, 0, 0.0, 0.0),
+                (0, 1, 16.0, 0.0),
+                (1, 0, 0.0, 24.0),
+                (1, 1, 16.0, 24.0),
+            ]:
+                cell_path = scan_dir / f"r{row:03d}_c{col:03d}" / "raw.png"
+                cell_path.parent.mkdir(parents=True, exist_ok=True)
+                x_px = col * step_x_px
+                y_px = row * step_y_px
+                cv2.imwrite(str(cell_path), base[y_px : y_px + tile_height, x_px : x_px + tile_width])
+                cells.append(
+                    {
+                        "row": row,
+                        "col": col,
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                        "raw_image": camera_trigger._rel(cell_path),
+                    }
+                )
+
+            manifest = {
+                "scan_id": scan_id,
+                "status": "complete",
+                "operation_mode": "real",
+                "plan": {
+                    "scan_type": "fixed_points_16",
+                    "pcb_size_known": False,
+                    "rows": 2,
+                    "cols": 2,
+                    "step_mm": {"x": 16.0, "y": 24.0},
+                    "origin_mm": {"x": 0.0, "y": 0.0},
+                    "image_px": {"width": tile_width, "height": tile_height},
+                    "mosaic_mode": "auto_crop_overlap",
+                },
+                "cells": cells,
+            }
+            manifest_path = scan_dir / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            result = camera_trigger.build_scan_mosaic(scan_id, run_detection=False)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["geometry"]["mode"], "auto_crop_overlap")
+            self.assertEqual(result["geometry"]["estimated_step_px"], {"x": step_x_px, "y": step_y_px})
+            mosaic = cv2.imread(str(camera_trigger.resolve_artifact(result["mosaic_raw"])))
+            self.assertEqual(mosaic.shape[:2], (canvas_height, canvas_width))
+            self.assertLess(float(np.mean(cv2.absdiff(mosaic, base))), 12.0)
+        finally:
+            if scan_dir.exists():
+                remove_tree_retry(scan_dir)
+
+    def test_detect_board_crop_returns_clear_rectangular_board_region(self):
+        image = np.full((90, 130, 3), 24, dtype=np.uint8)
+        image[22:72, 31:104] = 155
+
+        crop = camera_trigger._detect_board_crop(image)
+
+        self.assertEqual(crop["status"], "ok")
+        x, y, width, height = crop["bbox_px"]
+        self.assertLessEqual(abs(x - 31), 4)
+        self.assertLessEqual(abs(y - 22), 4)
+        self.assertLessEqual(abs(width - 73), 8)
+        self.assertLessEqual(abs(height - 50), 8)
+
+    def test_cell_mosaic_fusion_maps_crop_coordinates_and_marks_conflicts(self):
+        manifest = {
+            "cells": [
+                {
+                    "row": 0,
+                    "col": 0,
+                    "x_mm": 0.0,
+                    "y_mm": 0.0,
+                    "raw_image": "cell0/raw.jpg",
+                    "defects": [
+                        {"type": "short_circuit", "label": "短路", "bbox": [5, 5, 15, 15], "confidence": 0.62},
+                    ],
+                },
+                {
+                    "row": 0,
+                    "col": 1,
+                    "x_mm": 16.0,
+                    "y_mm": 0.0,
+                    "raw_image": "cell1/raw.jpg",
+                    "defects": [
+                        {"type": "short_circuit", "label": "短路", "bbox": [2, 5, 12, 15], "confidence": 0.58},
+                        {"type": "excess_solder", "label": "锡多", "bbox": [2, 5, 12, 15], "confidence": 0.55},
+                    ],
+                },
+                {
+                    "row": 0,
+                    "col": 2,
+                    "x_mm": 32.0,
+                    "y_mm": 0.0,
+                    "raw_image": "cell2/raw.jpg",
+                    "defects": [
+                        {"type": "pcb_damage", "label": "板损", "bbox": [0, 0, 6, 6], "confidence": 0.9},
+                    ],
+                },
+            ]
+        }
+        placed_cells = [
+            {"row": 0, "col": 0, "x_px": 0, "y_px": 0, "width_px": 20, "height_px": 20, "source_crop_px": [0, 0, 20, 20]},
+            {"row": 0, "col": 1, "x_px": 3, "y_px": 0, "width_px": 20, "height_px": 20, "source_crop_px": [0, 0, 20, 20]},
+            {"row": 0, "col": 2, "x_px": 50, "y_px": 0, "width_px": 10, "height_px": 20, "source_crop_px": [10, 0, 10, 20]},
+        ]
+        board_crop = {"status": "ok", "bbox_px": [2, 2, 18, 18]}
+
+        fusion = camera_trigger._fuse_cell_detections_for_mosaic(manifest, placed_cells, board_crop)
+
+        self.assertEqual(fusion["audit"]["coordinate_space"], "board_crop")
+        self.assertEqual(len(fusion["detections"]), 1)
+        detection = fusion["detections"][0]
+        self.assertEqual(detection["type"], "short_circuit")
+        self.assertEqual(detection["bbox"], [3, 3, 13, 13])
+        self.assertEqual(detection["mosaic_bbox"], [5, 5, 15, 15])
+        self.assertEqual(detection["support_count"], 2)
+        self.assertTrue(detection["has_conflict"])
+        self.assertEqual(detection["conflict_alternatives"][0]["type"], "excess_solder")
+        discarded_reasons = {item.get("reason") for item in fusion["audit"]["discarded_defects"]}
+        self.assertIn("outside_retained_source_crop", discarded_reasons)
 
     def test_build_scan_mosaic_blends_overlapping_cells(self):
         scan_id = f"unit-mosaic-{uuid.uuid4().hex[:8]}"

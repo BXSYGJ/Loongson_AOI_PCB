@@ -1,16 +1,30 @@
-# Loongson AOI PCB - UI Integration Branch
+# Loongson AOI PCB - Cloud Cooperative Platform
 
-This branch contains the web console that connects the PCB AOI workflow:
+This branch contains the cloud-cooperative web console for the PCB AOI workflow.
+It is derived from the phone-browser-inference branch, but the detection
+priority is now:
+
+```text
+Huawei Cloud ECS detection > same-LAN phone/browser inference > local computer or Loongson board fallback
+```
+
+The Loongson Education board is still responsible for real-mode slide-table
+movement and OV9281 capture. Defect inference is offloaded whenever possible,
+with local board inference kept as the lowest-priority fallback.
+
+The branch connects:
 
 - OV9281 camera capture and MJPEG preview
-- YOLO PCB defect inference
+- Huawei Cloud ECS + OBS ONNX detection
+- same-LAN phone/browser ONNX inference worker
+- local OpenCV DNN fallback detection
 - XYZ slide-table scan orchestration
 - WebSocket event updates for the browser UI
 - Handheld, simulated, real stepped-scan, continuous video scan, and phone-upload workflows
 
-The current UI is designed as a white industrial control panel. It is the
-branch to run when you want to verify the camera, open the web page, test the
-mock/simulation flow, or connect the UI to the hardware and algorithm branches.
+The current UI is designed as a white industrial control panel. It is the branch
+to run when you want the local website to coordinate camera/slide-table control
+while sending detection jobs to Huawei Cloud first.
 
 ## Main Files
 
@@ -32,7 +46,13 @@ mock/simulation flow, or connect the UI to the hardware and algorithm branches.
 | Simulation mode    | Existing PCB image          | Upload one or more PCB images and simulate a snake-grid slide scan over the image.                                   |
 | Real mode          | Camera + slide table + YOLO | Step the slide to each grid cell, settle, capture one image, run YOLO, then move to the next cell.                   |
 | Video detection    | Camera + slide table + YOLO | Continuous snake scan with live YOLO video and a moving FOV box on the PCB board.                                    |
-| Phone photo        | Phone browser + YOLO        | Upload phone photos from the same LAN, convert color images to grayscale, then run whole-board tiled YOLO detection. |
+| Phone photo        | Phone or desktop browser     | Upload phone photos, convert color images to grayscale, then detect through cloud, phone worker, or local fallback. |
+
+All five modes use the same detection scheduler. If
+`LOONGSON_AOI_CLOUD_API_BASE` is configured and reachable, the raw captured or
+uploaded image is sent to Huawei Cloud first. If cloud detection is unavailable,
+the website tries the same-LAN phone/browser inference worker. If that is also
+unavailable, it falls back to local OpenCV DNN inference.
 
 ## Quick Start on Windows
 
@@ -140,6 +160,42 @@ Passing a `.pt` path and `LOONGSON_AOI_DETECTOR_BACKEND=ultralytics` still works
 on development machines that have `torch` and `ultralytics`, but it is not the
 recommended board runtime.
 
+## Huawei Cloud Detection Priority
+
+Configure the local website to use the Huawei Cloud backend before starting
+Uvicorn:
+
+```powershell
+$env:LOONGSON_AOI_CLOUD_DETECTION_ENABLED = "1"
+$env:LOONGSON_AOI_CLOUD_API_BASE = "http://1.92.113.191:8010"
+$env:LOONGSON_AOI_CLOUD_TIMEOUT_SECONDS = "90"
+$env:LOONGSON_AOI_CLOUD_POLL_SECONDS = "0.35"
+```
+
+Then start the website:
+
+```powershell
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+`GET /api/system/status` reports the active detection priority and cloud
+configuration:
+
+```json
+{
+  "detection_priority": ["huawei_cloud", "phone_browser", "local_fallback"],
+  "cloud_detection": {
+    "enabled": true,
+    "configured": true,
+    "api_base": "http://1.92.113.191:8010"
+  }
+}
+```
+
+Huawei Cloud results are written back into the same local output layout as local
+detection. This keeps the UI, manifest, mosaic, and artifact viewer compatible
+with the existing simulation, real, video, and phone workflows.
+
 ## Loongson 2K1000LA Simulation-First Deployment
 
 For the first board-side validation stage, use simulation mode before phone
@@ -187,16 +243,19 @@ lower chance of starving the SSH/FinalShell session. After opening
 PCB image with long side no larger than `960`, set PCB length/width to
 `30mm x 30mm`, then start detection.
 
-## Phone Photo Detection
+## Phone Browser Inference Fallback
 
-The phone module is intended for quick LAN capture when the slide table or
-OV9281 is not being used. The phone can either open the complete UI or the
-minimal `/phone` page. The phone page has separate buttons for camera capture
-and gallery selection.
+The phone module remains useful in two ways:
 
-The `/phone` page is also the preferred browser inference worker. Keep that page
-open on the phone during the demo. When it loads `best.onnx` successfully, all
-five modes try to send YOLO inference jobs to the phone first:
+- as the fifth mode for taking or selecting PCB photos and sending them to the
+  cloud platform;
+- as a same-LAN browser inference worker when Huawei Cloud is unavailable.
+
+The phone can either open the complete UI or the minimal `/phone` page. The
+phone page has separate buttons for camera capture and gallery selection.
+
+When `/phone` loads `best.onnx` successfully, it can act as the second-priority
+inference worker for all five modes:
 
 - handheld realtime detection
 - simulation grid detection and final mosaic review
@@ -204,9 +263,10 @@ five modes try to send YOLO inference jobs to the phone first:
 - continuous video scan detection
 - phone photo whole-board detection
 
-If no phone worker is online, or if the phone worker fails a job, the Windows
-computer falls back to local inference automatically. The desktop status panel
-shows this as `手机推理: 在线 ...` or `手机推理: 离线，本机兜底`.
+If Huawei Cloud is unavailable and no phone worker is online, the Windows
+computer or Loongson board falls back to local inference automatically. The
+desktop status panel shows both `华为云检测` and `手机推理` so the active path is
+visible during demos.
 
 On the 2K1000LA, use phone detection only after simulation mode is stable.
 Large phone photos can still be much heavier than the simulation single-cell

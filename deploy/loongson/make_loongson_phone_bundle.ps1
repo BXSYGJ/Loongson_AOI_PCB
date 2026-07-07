@@ -23,7 +23,7 @@ if (Test-Path -LiteralPath $StageDir) {
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
 $BundleRoot = Join-Path $StageDir "Loongson_AOI_PCB"
-$BundleUi = Join-Path $BundleRoot "worktrees\ui-integration"
+$BundleUi = Join-Path $BundleRoot "worktrees\cloud-cooperative-platform"
 $BundleAlgorithm = Join-Path $BundleRoot "worktrees\algorithm-ai"
 New-Item -ItemType Directory -Force -Path $BundleUi | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $BundleAlgorithm "algorithm\configs") | Out-Null
@@ -32,12 +32,22 @@ New-Item -ItemType Directory -Force -Path (Join-Path $BundleAlgorithm "runs\dete
 $UiFiles = @(
     "main.py",
     "camera_trigger.py",
+    "detection_router.py",
+    "local_dnn_detector.py",
+    "llm_reporter.py",
     "motor_controller.py",
+    "motor_gpio_system_helper.py",
+    "motor_test.py",
     "requirements.txt",
     "requirements-loongson.txt",
     "README.md",
     "LOONGSON_2K1000LA_PHONE_DEPLOY.md",
+    "cloud_api_base.txt",
+    "camera_source.txt",
     "start_lan_server.sh",
+    "start_lan_server.ps1",
+    "start_qwen_llm.ps1",
+    "llm_config.local.ps1",
     "LICENSE"
 )
 
@@ -76,5 +86,5 @@ $zip = Get-Item -LiteralPath $ZipPath
     ZipPath = $zip.FullName
     SizeMB = [Math]::Round($zip.Length / 1MB, 2)
     BoardUnzipTarget = "~/Documents"
-    BoardUiDir = "~/Documents/Loongson_AOI_PCB/worktrees/ui-integration"
+    BoardUiDir = "~/Documents/Loongson_AOI_PCB/worktrees/cloud-cooperative-platform"
 }
