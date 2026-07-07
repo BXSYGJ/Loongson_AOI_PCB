@@ -36,6 +36,9 @@ VIDEO_SPEED_MM_S = float(os.getenv("LOONGSON_AOI_VIDEO_SPEED_MM_S", "2.0"))
 VIDEO_INFERENCE_FPS = float(os.getenv("LOONGSON_AOI_VIDEO_INFERENCE_FPS", "5.0"))
 VIDEO_PREVIEW_FPS = float(os.getenv("LOONGSON_AOI_VIDEO_PREVIEW_FPS", "8.0"))
 VIDEO_OVERLAP = float(os.getenv("LOONGSON_AOI_VIDEO_OVERLAP", "0.2"))
+REAL_SCAN_MOTION_SPEED_MM_S = float(
+    os.getenv("LOONGSON_AOI_REAL_SCAN_SPEED_MM_S", os.getenv("LOONGSON_AOI_MOTION_SPEED_MM_S", "3.0"))
+)
 MOCK_INFERENCE_SECONDS = 0.35
 LAN_LISTEN_HOST = "0.0.0.0"
 LAN_LISTEN_PORT = int(os.getenv("LOONGSON_AOI_LAN_PORT", os.getenv("PORT", "8000")))
@@ -52,6 +55,34 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return int(value, 0)
+
+
+def normalize_motion_speed(value: Any = None, default: float = REAL_SCAN_MOTION_SPEED_MM_S) -> float:
+    speed = float(default if value is None or str(value).strip() == "" else value)
+    if not math.isfinite(speed) or speed <= 0:
+        raise ValueError("motion_speed_mm_s must be a positive millimetre-per-second value.")
+    return round(max(0.05, min(speed, 50.0)), 4)
+
+
+def normalize_settle_seconds(value: Any = None, default: float = DEBOUNCE_SECONDS) -> float:
+    seconds = float(default if value is None or str(value).strip() == "" else value)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("settle_seconds must be a non-negative second value.")
+    return round(max(0.0, min(seconds, 10.0)), 4)
+
+
 def _is_loongson_host() -> bool:
     return "loong" in platform.machine().lower()
 
@@ -59,6 +90,30 @@ def _is_loongson_host() -> bool:
 EDGE_SAFE_MODE = _env_bool("LOONGSON_AOI_EDGE_SAFE_MODE", _is_loongson_host())
 STATUS_CAMERA_PROBE = _env_bool("LOONGSON_AOI_STATUS_CAMERA_PROBE", not EDGE_SAFE_MODE)
 PHONE_WORKER_ALLOW_DESKTOP = _env_bool("LOONGSON_AOI_ALLOW_DESKTOP_PHONE_WORKER", False)
+REAL_SCAN_PRESET = os.getenv("LOONGSON_AOI_REAL_SCAN_PRESET", "fixed16").strip().lower()
+FIXED_SCAN_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 16.0)
+FIXED_SCAN_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 24.0)
+FIXED_SCAN_IMAGE_WIDTH = _env_int("LOONGSON_AOI_CAMERA_WIDTH", 1280)
+FIXED_SCAN_IMAGE_HEIGHT = _env_int("LOONGSON_AOI_CAMERA_HEIGHT", 800)
+FIXED_SCAN_SETTLE_SECONDS = _env_float("LOONGSON_AOI_FIXED_SCAN_SETTLE_SECONDS", 1.0)
+FIXED_SCAN_POINTS_DEFAULT = (
+    (0.0, 0.0),
+    (0.0, 24.0),
+    (0.0, 48.0),
+    (0.0, 72.0),
+    (16.0, 0.0),
+    (16.0, 24.0),
+    (16.0, 48.0),
+    (16.0, 72.0),
+    (32.0, 0.0),
+    (32.0, 24.0),
+    (32.0, 48.0),
+    (32.0, 72.0),
+    (48.0, 0.0),
+    (48.0, 24.0),
+    (48.0, 48.0),
+    (48.0, 72.0),
+)
 
 
 def _is_phone_worker(info: dict[str, Any]) -> bool:
@@ -634,6 +689,90 @@ def network_status(request: Request | None = None) -> dict[str, Any]:
     }
 
 
+def _parse_fixed_scan_points() -> list[tuple[float, float]]:
+    value = os.getenv("LOONGSON_AOI_FIXED_SCAN_POINTS", "").strip()
+    if not value:
+        return list(FIXED_SCAN_POINTS_DEFAULT)
+    points: list[tuple[float, float]] = []
+    for item in re.split(r"[;|]+", value):
+        item = item.strip()
+        if not item:
+            continue
+        parts = [part.strip() for part in item.split(",")]
+        if len(parts) != 2:
+            raise ValueError("LOONGSON_AOI_FIXED_SCAN_POINTS must use x,y;x,y format.")
+        points.append((float(parts[0]), float(parts[1])))
+    if not points:
+        raise ValueError("LOONGSON_AOI_FIXED_SCAN_POINTS did not contain any usable points.")
+    return points
+
+
+def build_fixed_16_scan_plan(origin_x_mm: float = 0.0, origin_y_mm: float = 0.0) -> dict[str, Any]:
+    if origin_x_mm < 0 or origin_y_mm < 0:
+        raise ValueError("Origin coordinates must be non-negative.")
+    points = _parse_fixed_scan_points()
+    x_values = sorted({round(point[0], 4) for point in points})
+    y_values = sorted({round(point[1], 4) for point in points})
+    if len(points) != len(x_values) * len(y_values):
+        raise ValueError("Fixed scan points must form a complete rectangular grid.")
+    if not x_values or not y_values:
+        raise ValueError("Fixed scan points are empty.")
+
+    max_x = origin_x_mm + max(x_values)
+    max_y = origin_y_mm + max(y_values)
+    if max_x > MAX_X_MM or max_y > MAX_Y_MM:
+        raise ValueError(
+            f"Fixed scan points exceed slide travel: max_x={max_x:.2f}mm, max_y={max_y:.2f}mm, "
+            f"limit={MAX_X_MM:.2f}x{MAX_Y_MM:.2f}mm."
+        )
+
+    x_to_col = {value: index for index, value in enumerate(x_values)}
+    y_to_row = {value: index for index, value in enumerate(y_values)}
+    scan_points: list[dict[str, Any]] = []
+    for order, (x_raw, y_raw) in enumerate(points):
+        x = round(float(x_raw), 4)
+        y = round(float(y_raw), 4)
+        scan_points.append(
+            {
+                "order": order,
+                "row": y_to_row[round(y, 4)],
+                "col": x_to_col[round(x, 4)],
+                "x_mm": round(origin_x_mm + x, 4),
+                "y_mm": round(origin_y_mm + y, 4),
+            }
+        )
+
+    rows = len(y_values)
+    cols = len(x_values)
+    covered_length = cols * FIXED_SCAN_STEP_X_MM
+    covered_width = rows * FIXED_SCAN_STEP_Y_MM
+    return {
+        "scan_type": "fixed_points_16",
+        "pcb_size_known": False,
+        "rows": rows,
+        "cols": cols,
+        "total_cells": len(scan_points),
+        "scan_points": scan_points,
+        "point_order": "x_major_teammate_fixed_points",
+        "fov_mm": {"width": FIXED_SCAN_STEP_X_MM, "height": FIXED_SCAN_STEP_Y_MM},
+        "step_mm": {"x": FIXED_SCAN_STEP_X_MM, "y": FIXED_SCAN_STEP_Y_MM},
+        "image_px": {"width": FIXED_SCAN_IMAGE_WIDTH, "height": FIXED_SCAN_IMAGE_HEIGHT},
+        "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
+        "covered_mm": {"length": round(covered_length, 4), "width": round(covered_width, 4)},
+        "mosaic_mode": "auto_crop_overlap",
+        "settle_seconds": normalize_settle_seconds(FIXED_SCAN_SETTLE_SECONDS),
+        "motion_speed_mm_s": normalize_motion_speed(),
+        "z_policy": "fixed_during_scan",
+        "logical_boundary": {
+            "overflow_right_mm": 0.0,
+            "overflow_bottom_mm": 0.0,
+            "last_col_visible_ratio": 1.0,
+            "last_row_visible_ratio": 1.0,
+            "edge_cells_clipped": False,
+        },
+    }
+
+
 def build_grid_plan(
     pcb_length_mm: float,
     pcb_width_mm: float,
@@ -694,6 +833,16 @@ def build_grid_plan(
 
 
 def iter_snake_cells(plan: dict[str, Any]) -> list[dict[str, float | int]]:
+    if plan.get("scan_points"):
+        return [
+            {
+                "row": int(point["row"]),
+                "col": int(point["col"]),
+                "x_mm": float(point["x_mm"]),
+                "y_mm": float(point["y_mm"]),
+            }
+            for point in plan["scan_points"]
+        ]
     rows = int(plan["rows"])
     cols = int(plan["cols"])
     origin = plan["origin_mm"]
@@ -829,6 +978,553 @@ async def send_packet(websocket: WebSocket, packet_type: str, payload: dict[str,
     await websocket.send_json(packet)
 
 
+async def run_real_scan_capture_queue(
+    websocket: WebSocket,
+    scan_id: str,
+    plan: dict[str, Any],
+    detection_platform: str,
+    stop_event: asyncio.Event,
+) -> None:
+    cells = iter_snake_cells(plan)
+    total = len(cells)
+    settle_seconds = float(plan.get("settle_seconds", DEBOUNCE_SECONDS) or DEBOUNCE_SECONDS)
+    motion_speed_mm_s = normalize_motion_speed(plan.get("motion_speed_mm_s"))
+
+    plan_payload = dict(plan)
+    plan_payload["operation_mode"] = "real"
+    plan_payload["detection_platform"] = detection_platform
+    plan_payload["capture_pipeline"] = "capture_first_async_detection_queue"
+    plan_payload["motion_speed_mm_s"] = motion_speed_mm_s
+
+    send_lock = asyncio.Lock()
+
+    async def emit(packet_type: str, payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await send_packet(websocket, packet_type, payload, scan_id)
+
+    await emit("grid_plan", plan_payload)
+
+    manifest_cells: dict[str, dict[str, Any]] = {}
+
+    def update_manifest_cell(row: int, col: int, data: dict[str, Any]) -> None:
+        key = f"{row}:{col}"
+        cell = manifest_cells.setdefault(
+            key,
+            {
+                "row": row,
+                "col": col,
+                "x_mm": data.get("x_mm"),
+                "y_mm": data.get("y_mm"),
+                "status": "planned",
+            },
+        )
+        cell.update({field: value for field, value in data.items() if value is not None})
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            "real",
+            list(manifest_cells.values()),
+            status="running",
+        )
+
+    camera_trigger.write_scan_manifest(scan_id, plan_payload, "real", [], status="running")
+
+    detection_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    queue_stats: dict[str, Any] = {
+        "captured": 0,
+        "completed": 0,
+        "detected": 0,
+        "errors": 0,
+        "active": None,
+    }
+
+    def queue_payload() -> dict[str, Any]:
+        pending = max(0, int(queue_stats["captured"]) - int(queue_stats["completed"]))
+        active = queue_stats.get("active")
+        return {
+            "pending": pending,
+            "captured": int(queue_stats["captured"]),
+            "completed": int(queue_stats["completed"]),
+            "detected": int(queue_stats["detected"]),
+            "errors": int(queue_stats["errors"]),
+            "total": total,
+            "active": active,
+            "idle": pending == 0 and active is None,
+            "operation_mode": "real",
+            "detection_platform": detection_platform,
+        }
+
+    async def emit_queue() -> None:
+        await emit("detection_queue", queue_payload())
+
+    async def detection_worker() -> None:
+        while True:
+            item = await detection_queue.get()
+            if item is None:
+                detection_queue.task_done()
+                break
+
+            row = int(item["row"])
+            col = int(item["col"])
+            x_mm = float(item["x_mm"])
+            y_mm = float(item["y_mm"])
+            capture = dict(item["capture"])
+            queue_stats["active"] = {"row": row, "col": col}
+            update_manifest_cell(row, col, {"x_mm": x_mm, "y_mm": y_mm, "status": "detecting"})
+            await emit(
+                "scan_phase",
+                {
+                    "phase": "detect_inference",
+                    "row": row,
+                    "col": col,
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "raw_image": capture.get("raw_image"),
+                    "capture_ms": capture.get("capture_ms"),
+                    "source": "camera",
+                    "detection_platform": detection_platform,
+                    "queue": queue_payload(),
+                },
+            )
+            await emit_queue()
+
+            try:
+                result = await detect_artifact_phone_first(
+                    capture["raw_image"],
+                    camera_trigger.SCAN_OUTPUT_DIR / scan_id / f"r{row:03d}_c{col:03d}" / "annotated.jpg",
+                    camera_trigger.SCAN_OUTPUT_DIR / scan_id / f"r{row:03d}_c{col:03d}" / "result.json",
+                    {
+                        "operation_mode": "real",
+                        "scan_id": scan_id,
+                        "row": row,
+                        "col": col,
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                        "capture_source": "camera",
+                        "detection_platform": detection_platform,
+                    },
+                )
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "error": "detect_exception",
+                    "message": str(exc),
+                    "raw_image": capture.get("raw_image"),
+                    "detection_platform": detection_platform,
+                    "inference_location": detection_platform,
+                }
+
+            queue_stats["completed"] = int(queue_stats["completed"]) + 1
+            queue_stats["active"] = None
+
+            if not result.get("ok"):
+                queue_stats["errors"] = int(queue_stats["errors"]) + 1
+                update_manifest_cell(
+                    row,
+                    col,
+                    {
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                        "status": "detect_failed",
+                        "raw_image": capture.get("raw_image"),
+                        "capture_ms": capture.get("capture_ms"),
+                        "error": result.get("error"),
+                        "message": result.get("message"),
+                        "detection_platform": detection_platform,
+                    },
+                )
+                await emit(
+                    "scan_phase",
+                    {
+                        "phase": "detect_failed",
+                        "row": row,
+                        "col": col,
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                        "raw_image": capture.get("raw_image"),
+                        "error": result.get("error"),
+                        "message": result.get("message"),
+                        "queue": queue_payload(),
+                    },
+                )
+                detection_queue.task_done()
+                await emit_queue()
+                continue
+
+            queue_stats["detected"] = int(queue_stats["detected"]) + 1
+            result["row"] = row
+            result["col"] = col
+            result["x_mm"] = x_mm
+            result["y_mm"] = y_mm
+            result["capture_ms"] = capture.get("capture_ms")
+            result["source_image"] = capture.get("source_image")
+            result["simulation_crop"] = capture.get("simulation_crop")
+
+            update_manifest_cell(
+                row,
+                col,
+                {
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "status": "detected",
+                    "raw_image": result.get("raw_image"),
+                    "annotated_image": result.get("annotated_image"),
+                    "result_json": result.get("result_json"),
+                    "defects": result.get("defects", []),
+                    "capture_ms": result.get("capture_ms"),
+                    "inference_ms": result.get("inference_ms"),
+                    "inference_location": result.get("inference_location"),
+                    "detection_platform": result.get("detection_platform"),
+                    "platform_priority": result.get("platform_priority"),
+                    "fallback_reason": result.get("fallback_reason"),
+                    "cloud_fallback_reason": result.get("cloud_fallback_reason"),
+                    "local_fallback": result.get("local_fallback"),
+                    "cloud_job_id": result.get("cloud_job_id"),
+                    "cloud_annotated_image_url": result.get("cloud_annotated_image_url"),
+                    "cloud_result_json_url": result.get("cloud_result_json_url"),
+                },
+            )
+
+            await emit(
+                "scan_result",
+                {
+                    "row": row,
+                    "col": col,
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "phase": "result",
+                    "progress": {"done": int(queue_stats["completed"]), "total": total},
+                    "result_json": result["result_json"],
+                    "defects": result["defects"],
+                    "raw_image": result.get("raw_image"),
+                    "annotated_image": result.get("annotated_image"),
+                    "capture_ms": result.get("capture_ms"),
+                    "inference_ms": result.get("inference_ms"),
+                    "inference_location": result.get("inference_location"),
+                    "detection_platform": result.get("detection_platform"),
+                    "platform_priority": result.get("platform_priority"),
+                    "fallback_reason": result.get("fallback_reason"),
+                    "cloud_fallback_reason": result.get("cloud_fallback_reason"),
+                    "local_fallback": result.get("local_fallback"),
+                    "cloud_job_id": result.get("cloud_job_id"),
+                    "cloud_annotated_image_url": result.get("cloud_annotated_image_url"),
+                    "cloud_result_json_url": result.get("cloud_result_json_url"),
+                    "operation_mode": "real",
+                    "queue": queue_payload(),
+                },
+            )
+            detection_queue.task_done()
+            await emit_queue()
+
+    worker_task = asyncio.create_task(detection_worker())
+    stopped_early = False
+    capture_failure: dict[str, Any] | None = None
+
+    for index, cell in enumerate(cells, start=1):
+        if stop_event.is_set():
+            stopped_early = True
+            break
+
+        row = int(cell["row"])
+        col = int(cell["col"])
+        x_mm = float(cell["x_mm"])
+        y_mm = float(cell["y_mm"])
+        first_cell_capture = index == 1
+
+        update_manifest_cell(row, col, {"x_mm": x_mm, "y_mm": y_mm, "status": "capturing" if first_cell_capture else "moving"})
+
+        if first_cell_capture:
+            await emit(
+                "scan_phase",
+                {
+                    "phase": "capture_first_frame",
+                    "row": row,
+                    "col": col,
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "operation_mode": "real",
+                    "motion": "none",
+                    "message": "首点先拍照，随后再进入滑台移动流程。",
+                    "motion_speed_mm_s": motion_speed_mm_s,
+                },
+            )
+        else:
+            await emit(
+                "scan_phase",
+                {
+                    "phase": "move_xy",
+                    "row": row,
+                    "col": col,
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "operation_mode": "real",
+                    "motion": "physical",
+                    "motion_speed_mm_s": motion_speed_mm_s,
+                },
+            )
+            try:
+                await asyncio.to_thread(motor_controller.move_to_xy_stream, x_mm, y_mm, motion_speed_mm_s)
+            except Exception as exc:
+                await emit(
+                    "scan_error",
+                    {
+                        "message": f"XY move failed at row={row}, col={col}: {exc}",
+                        "row": row,
+                        "col": col,
+                        "x_mm": x_mm,
+                        "y_mm": y_mm,
+                    },
+                )
+                stopped_early = True
+                break
+
+            await emit(
+                "scan_phase",
+                {"phase": "debounce", "duration_ms": int(settle_seconds * 1000), "row": row, "col": col},
+            )
+            await asyncio.sleep(settle_seconds)
+
+        if stop_event.is_set():
+            stopped_early = True
+            break
+
+        await emit(
+            "scan_phase",
+            {
+                "phase": "capture_frame",
+                "row": row,
+                "col": col,
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "source": "camera",
+                "queue": queue_payload(),
+            },
+        )
+        capture = await camera_trigger.capture_frame(row, col, x_mm, y_mm, scan_id, stop_event)
+        if not capture.get("ok"):
+            update_manifest_cell(
+                row,
+                col,
+                {
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                    "status": "capture_failed",
+                    "error": capture.get("error"),
+                    "message": capture.get("message"),
+                },
+            )
+            capture_failure = capture
+            stopped_early = True
+            break
+
+        queue_stats["captured"] = int(queue_stats["captured"]) + 1
+        update_manifest_cell(
+            row,
+            col,
+            {
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "status": "captured",
+                "raw_image": capture.get("raw_image"),
+                "latest_image": capture.get("latest_image"),
+                "capture_ms": capture.get("capture_ms"),
+            },
+        )
+        await emit(
+            "scan_phase",
+            {
+                "phase": "capture_frame",
+                "row": row,
+                "col": col,
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "raw_image": capture.get("raw_image"),
+                "capture_ms": capture.get("capture_ms"),
+                "source": "camera",
+                "queued_for_detection": True,
+                "queue": queue_payload(),
+            },
+        )
+        await detection_queue.put(
+            {
+                "row": row,
+                "col": col,
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "capture": capture,
+                "index": index,
+            }
+        )
+        await emit_queue()
+        await asyncio.sleep(0)
+
+    origin = plan["origin_mm"]
+    origin_x_mm = float(origin["x"])
+    origin_y_mm = float(origin["y"])
+
+    await emit(
+        "scan_phase",
+        {
+            "phase": "drain_detection_queue",
+            "operation_mode": "real",
+            "cell_count": int(queue_stats["captured"]),
+            "queue": queue_payload(),
+        },
+    )
+    await detection_queue.join()
+    await detection_queue.put(None)
+    await detection_queue.join()
+    await worker_task
+    await emit_queue()
+
+    if capture_failure:
+        packet_type = "scan_stopped" if capture_failure.get("error") == "scan_stopped" else "scan_error"
+        await emit(packet_type, capture_failure)
+        return
+
+    if stopped_early or int(queue_stats["captured"]) < total:
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            "real",
+            list(manifest_cells.values()),
+            status="stopped",
+        )
+        await emit(
+            "scan_stopped",
+            {
+                "message": "Scan stopped before all 16 capture points were completed.",
+                "progress": {"done": int(queue_stats["captured"]), "total": total},
+                "queue": queue_payload(),
+            },
+        )
+        return
+
+    mosaic_payload: dict[str, Any] | None = None
+    skip_mosaic_detection = detection_platform == "local_dnn"
+    await emit(
+        "scan_phase",
+        {"phase": "mosaic_stitching", "operation_mode": "real", "cell_count": len(manifest_cells), "queue": queue_payload()},
+    )
+    if not skip_mosaic_detection:
+        await emit(
+            "scan_phase",
+            {"phase": "mosaic_detecting", "operation_mode": "real", "cell_count": len(manifest_cells)},
+        )
+    try:
+        mosaic_payload = await asyncio.to_thread(camera_trigger.build_scan_mosaic, scan_id, False)
+        mosaic_dir = camera_trigger.SCAN_OUTPUT_DIR / scan_id / "mosaic"
+        if skip_mosaic_detection:
+            mosaic_payload["mosaic_annotated"] = mosaic_payload.get("mosaic_annotated") or mosaic_payload.get("mosaic_raw")
+            mosaic_payload["inference_ms"] = 0
+            mosaic_payload["inference_location"] = "skipped"
+            mosaic_payload["detection_platform"] = detection_platform
+            mosaic_payload["mosaic_detection_skipped"] = True
+            mosaic_payload["skip_reason"] = "real_local_dnn_mosaic_detection_disabled"
+            await emit(
+                "scan_phase",
+                {
+                    "phase": "mosaic_detection_skipped",
+                    "operation_mode": "real",
+                    "detection_platform": detection_platform,
+                    "message": "真实模式本地检测已跳过整板复核，仅保留拼接图和逐格检测结果。",
+                },
+            )
+        else:
+            mosaic_detection = await detect_artifact_phone_first(
+                mosaic_payload["mosaic_raw"],
+                mosaic_dir / "mosaic_annotated.jpg",
+                mosaic_dir / "mosaic_result.json",
+                {
+                    "operation_mode": "real",
+                    "scan_id": scan_id,
+                    "phase": "mosaic_detecting",
+                    "detection_platform": detection_platform,
+                },
+            )
+            if mosaic_detection.get("ok"):
+                mosaic_payload["defects"] = mosaic_detection.get("defects", [])
+                mosaic_payload["mosaic_annotated"] = mosaic_detection.get("annotated_image")
+                mosaic_payload["mosaic_result_json"] = mosaic_detection.get("result_json")
+                mosaic_payload["inference_ms"] = mosaic_detection.get("inference_ms")
+                mosaic_payload["inference_location"] = mosaic_detection.get("inference_location")
+                mosaic_payload["detection_platform"] = mosaic_detection.get("detection_platform")
+                mosaic_payload["platform_priority"] = mosaic_detection.get("platform_priority")
+                mosaic_payload["fallback_reason"] = mosaic_detection.get("fallback_reason")
+                mosaic_payload["cloud_fallback_reason"] = mosaic_detection.get("cloud_fallback_reason")
+                mosaic_payload["local_fallback"] = mosaic_detection.get("local_fallback")
+                mosaic_payload["cloud_job_id"] = mosaic_detection.get("cloud_job_id")
+                mosaic_payload["cloud_annotated_image_url"] = mosaic_detection.get("cloud_annotated_image_url")
+                mosaic_payload["cloud_result_json_url"] = mosaic_detection.get("cloud_result_json_url")
+
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            "real",
+            list(manifest_cells.values()),
+            status="complete",
+            extra={"mosaic": mosaic_payload, "detection_queue": queue_payload()},
+        )
+        await emit("mosaic_result", mosaic_payload)
+    except Exception as exc:
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            "real",
+            list(manifest_cells.values()),
+            status="complete_with_mosaic_error",
+            extra={"mosaic_error": str(exc), "detection_queue": queue_payload()},
+        )
+        await emit(
+            "mosaic_error",
+            {"message": f"Mosaic stitching or detection failed: {exc}", "operation_mode": "real"},
+        )
+
+    await emit(
+        "scan_phase",
+        {
+            "phase": "return_origin",
+            "x_mm": origin_x_mm,
+            "y_mm": origin_y_mm,
+            "operation_mode": "real",
+            "detection_platform": detection_platform,
+            "motion": "physical",
+            "motion_speed_mm_s": motion_speed_mm_s,
+            "queue": queue_payload(),
+        },
+    )
+    try:
+        await asyncio.to_thread(motor_controller.move_to_xy_stream, origin_x_mm, origin_y_mm, motion_speed_mm_s)
+    except Exception as exc:
+        await emit(
+            "scan_error",
+            {
+                "message": f"Return to scan origin failed: {exc}",
+                "x_mm": origin_x_mm,
+                "y_mm": origin_y_mm,
+                "progress": {"done": int(queue_stats["captured"]), "total": total},
+                "mosaic": mosaic_payload,
+            },
+        )
+        return
+
+    await emit(
+        "scan_complete",
+        {
+            "message": "Scan complete. Origin restored.",
+            "progress": {"done": int(queue_stats["completed"]), "total": total},
+            "returned_to_origin": True,
+            "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
+            "operation_mode": "real",
+            "detection_platform": detection_platform,
+            "return_motion": "physical",
+            "mosaic": mosaic_payload,
+            "queue": queue_payload(),
+            "detection_errors": int(queue_stats["errors"]),
+        },
+    )
+
+
 async def run_scan(
     websocket: WebSocket,
     scan_id: str,
@@ -839,9 +1535,14 @@ async def run_scan(
     detection_platform: str,
     stop_event: asyncio.Event,
 ) -> None:
+    if operation_mode == "real" and capture_mode != "mock":
+        await run_real_scan_capture_queue(websocket, scan_id, plan, detection_platform, stop_event)
+        return
+
     cells = iter_snake_cells(plan)
     total = len(cells)
     motion_enabled = operation_mode == "real"
+    settle_seconds = float(plan.get("settle_seconds", DEBOUNCE_SECONDS) or DEBOUNCE_SECONDS)
 
     plan_payload = dict(plan)
     plan_payload["operation_mode"] = operation_mode
@@ -923,10 +1624,10 @@ async def run_scan(
         await send_packet(
             websocket,
             "scan_phase",
-            {"phase": "debounce", "duration_ms": int(DEBOUNCE_SECONDS * 1000), "row": row, "col": col},
+            {"phase": "debounce", "duration_ms": int(settle_seconds * 1000), "row": row, "col": col},
             scan_id,
         )
-        await asyncio.sleep(DEBOUNCE_SECONDS)
+        await asyncio.sleep(settle_seconds)
 
         if stop_event.is_set():
             await send_packet(
@@ -1179,46 +1880,67 @@ async def run_scan(
 
     mosaic_payload: dict[str, Any] | None = None
     if operation_mode in {"real", "simulation"}:
+        skip_mosaic_detection = operation_mode == "real" and detection_platform == "local_dnn"
         await send_packet(
             websocket,
             "scan_phase",
             {"phase": "mosaic_stitching", "operation_mode": operation_mode, "cell_count": len(manifest_cells)},
             scan_id,
         )
-        await send_packet(
-            websocket,
-            "scan_phase",
-            {"phase": "mosaic_detecting", "operation_mode": operation_mode, "cell_count": len(manifest_cells)},
-            scan_id,
-        )
+        if not skip_mosaic_detection:
+            await send_packet(
+                websocket,
+                "scan_phase",
+                {"phase": "mosaic_detecting", "operation_mode": operation_mode, "cell_count": len(manifest_cells)},
+                scan_id,
+            )
         try:
             mosaic_payload = await asyncio.to_thread(camera_trigger.build_scan_mosaic, scan_id, False)
             mosaic_dir = camera_trigger.SCAN_OUTPUT_DIR / scan_id / "mosaic"
-            mosaic_detection = await detect_artifact_phone_first(
-                mosaic_payload["mosaic_raw"],
-                mosaic_dir / "mosaic_annotated.jpg",
-                mosaic_dir / "mosaic_result.json",
-                {
-                    "operation_mode": operation_mode,
-                    "scan_id": scan_id,
-                    "phase": "mosaic_detecting",
-                    "detection_platform": detection_platform,
-                },
-            )
-            if mosaic_detection.get("ok"):
-                mosaic_payload["defects"] = mosaic_detection.get("defects", [])
-                mosaic_payload["mosaic_annotated"] = mosaic_detection.get("annotated_image")
-                mosaic_payload["mosaic_result_json"] = mosaic_detection.get("result_json")
-                mosaic_payload["inference_ms"] = mosaic_detection.get("inference_ms")
-                mosaic_payload["inference_location"] = mosaic_detection.get("inference_location")
-                mosaic_payload["detection_platform"] = mosaic_detection.get("detection_platform")
-                mosaic_payload["platform_priority"] = mosaic_detection.get("platform_priority")
-                mosaic_payload["fallback_reason"] = mosaic_detection.get("fallback_reason")
-                mosaic_payload["cloud_fallback_reason"] = mosaic_detection.get("cloud_fallback_reason")
-                mosaic_payload["local_fallback"] = mosaic_detection.get("local_fallback")
-                mosaic_payload["cloud_job_id"] = mosaic_detection.get("cloud_job_id")
-                mosaic_payload["cloud_annotated_image_url"] = mosaic_detection.get("cloud_annotated_image_url")
-                mosaic_payload["cloud_result_json_url"] = mosaic_detection.get("cloud_result_json_url")
+            if skip_mosaic_detection:
+                mosaic_payload["mosaic_annotated"] = mosaic_payload.get("mosaic_annotated") or mosaic_payload.get("mosaic_raw")
+                mosaic_payload["inference_ms"] = 0
+                mosaic_payload["inference_location"] = "skipped"
+                mosaic_payload["detection_platform"] = detection_platform
+                mosaic_payload["mosaic_detection_skipped"] = True
+                mosaic_payload["skip_reason"] = "real_local_dnn_mosaic_detection_disabled"
+                await send_packet(
+                    websocket,
+                    "scan_phase",
+                    {
+                        "phase": "mosaic_detection_skipped",
+                        "operation_mode": operation_mode,
+                        "detection_platform": detection_platform,
+                        "message": "真实模式本地检测已跳过整板复核，仅保留拼接图和逐格检测结果。",
+                    },
+                    scan_id,
+                )
+            else:
+                mosaic_detection = await detect_artifact_phone_first(
+                    mosaic_payload["mosaic_raw"],
+                    mosaic_dir / "mosaic_annotated.jpg",
+                    mosaic_dir / "mosaic_result.json",
+                    {
+                        "operation_mode": operation_mode,
+                        "scan_id": scan_id,
+                        "phase": "mosaic_detecting",
+                        "detection_platform": detection_platform,
+                    },
+                )
+                if mosaic_detection.get("ok"):
+                    mosaic_payload["defects"] = mosaic_detection.get("defects", [])
+                    mosaic_payload["mosaic_annotated"] = mosaic_detection.get("annotated_image")
+                    mosaic_payload["mosaic_result_json"] = mosaic_detection.get("result_json")
+                    mosaic_payload["inference_ms"] = mosaic_detection.get("inference_ms")
+                    mosaic_payload["inference_location"] = mosaic_detection.get("inference_location")
+                    mosaic_payload["detection_platform"] = mosaic_detection.get("detection_platform")
+                    mosaic_payload["platform_priority"] = mosaic_detection.get("platform_priority")
+                    mosaic_payload["fallback_reason"] = mosaic_detection.get("fallback_reason")
+                    mosaic_payload["cloud_fallback_reason"] = mosaic_detection.get("cloud_fallback_reason")
+                    mosaic_payload["local_fallback"] = mosaic_detection.get("local_fallback")
+                    mosaic_payload["cloud_job_id"] = mosaic_detection.get("cloud_job_id")
+                    mosaic_payload["cloud_annotated_image_url"] = mosaic_detection.get("cloud_annotated_image_url")
+                    mosaic_payload["cloud_result_json_url"] = mosaic_detection.get("cloud_result_json_url")
             camera_trigger.write_scan_manifest(
                 scan_id,
                 plan_payload,
@@ -1835,6 +2557,17 @@ async def grid_preview(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/grid/fixed16-preview")
+async def fixed16_grid_preview(
+    origin_x_mm: float = Query(0.0, ge=0),
+    origin_y_mm: float = Query(0.0, ge=0),
+) -> dict[str, Any]:
+    try:
+        return build_fixed_16_scan_plan(origin_x_mm, origin_y_mm)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.websocket("/ws/control")
 async def websocket_control(websocket: WebSocket) -> None:
     global active_stop_event, active_scan_task
@@ -1980,15 +2713,27 @@ async def websocket_control(websocket: WebSocket) -> None:
                     continue
 
                 try:
-                    plan = build_grid_plan(
-                        float(payload["pcb_length_mm"]),
-                        float(payload["pcb_width_mm"]),
-                        float(payload.get("origin_x_mm", 0.0)),
-                        float(payload.get("origin_y_mm", 0.0)),
-                    )
                     operation_mode, capture_mode = normalize_operation_mode(payload)
                     if operation_mode == "phone":
                         raise ValueError("Use start_phone_detection for phone upload detection mode.")
+                    origin_x_mm = float(payload.get("origin_x_mm", 0.0))
+                    origin_y_mm = float(payload.get("origin_y_mm", 0.0))
+                    if operation_mode == "real" and REAL_SCAN_PRESET == "fixed16":
+                        plan = build_fixed_16_scan_plan(origin_x_mm, origin_y_mm)
+                    else:
+                        plan = build_grid_plan(
+                            float(payload["pcb_length_mm"]),
+                            float(payload["pcb_width_mm"]),
+                            origin_x_mm,
+                            origin_y_mm,
+                        )
+                    if operation_mode == "real":
+                        plan["motion_speed_mm_s"] = normalize_motion_speed(
+                            payload.get("motion_speed_mm_s", plan.get("motion_speed_mm_s"))
+                        )
+                        plan["settle_seconds"] = normalize_settle_seconds(
+                            payload.get("settle_seconds", plan.get("settle_seconds"))
+                        )
                     detection_platform = normalize_detection_platform(payload.get("detection_platform"))
                 except (KeyError, TypeError, ValueError) as exc:
                     await send_packet(websocket, "scan_error", {"request_id": request_id, "message": str(exc)})

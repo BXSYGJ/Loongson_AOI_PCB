@@ -33,6 +33,7 @@ PY
 echo "Detector check ..."
 python - <<'PY'
 import json
+import os
 import camera_trigger
 status = camera_trigger.detector_status()
 print(json.dumps(status, ensure_ascii=False, indent=2))
@@ -40,8 +41,10 @@ if status.get("backend") != "onnx_opencv":
     raise SystemExit("detector backend is not onnx_opencv")
 if not status.get("weights_exists"):
     raise SystemExit("ONNX weights not found")
-if int(status.get("onnx_input_imgsz") or 0) != 640:
-    raise SystemExit("ONNX input size is not 640")
+expected = int(os.getenv("LOONGSON_AOI_ONNX_INPUT_IMGSZ") or "0")
+actual = int(status.get("onnx_input_imgsz") or 0)
+if expected > 0 and actual != expected:
+    raise SystemExit(f"ONNX input size is {actual}, expected {expected}")
 PY
 
 echo "Runtime check passed."

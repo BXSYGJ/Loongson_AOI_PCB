@@ -29,6 +29,8 @@ import argparse
 import json
 import math
 import os
+import shlex
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -93,6 +95,51 @@ def _env_axis_bool(axis: str, field: str, default: bool) -> bool:
 def _log(message: str) -> None:
     if _env_bool("LOONGSON_AOI_MOTOR_VERBOSE", True):
         print(f"[motor] {message}")
+
+
+def _gpio_chip_path() -> str:
+    return f"/dev/gpiochip{GPIO_CHIP}" if str(GPIO_CHIP).isdigit() else str(GPIO_CHIP)
+
+
+def _gpio_offsets_text(output_offsets: set[int], input_offsets: set[int]) -> str:
+    outputs = ",".join(str(offset) for offset in sorted(output_offsets)) or "-"
+    inputs = ",".join(str(offset) for offset in sorted(input_offsets)) or "-"
+    return f"outputs={outputs}; inputs={inputs}"
+
+
+def _gpio_debug_command() -> str:
+    chip = _gpio_chip_path()
+    return (
+        "python -c \"import gpiod; "
+        f"c=gpiod.Chip('{chip}'); "
+        "info=c.get_info(); print(info); print('num_lines=', getattr(info, 'num_lines', None))\""
+    )
+
+
+def _gpio_permission_message(exc: BaseException) -> str:
+    chip = _gpio_chip_path()
+    return (
+        f"GPIO permission denied while opening {chip}: {exc}. "
+        "Run the real-motion web server with sudo, or grant the current user read/write permission "
+        "to the gpiochip device. Keep LOONGSON_AOI_MOTOR_DRY_RUN=1 when testing without GPIO access."
+    )
+
+
+def _gpio_request_message(exc: BaseException, api: str, output_offsets: set[int], input_offsets: set[int]) -> str:
+    chip = _gpio_chip_path()
+    return (
+        f"GPIO request failed on {chip} api={api}: {exc}. "
+        f"Requested offsets: {_gpio_offsets_text(output_offsets, input_offsets)}. "
+        "If this is (22, 'Invalid argument'), check whether the configured offsets exceed gpiochip num_lines "
+        f"or force the legacy path with LOONGSON_AOI_GPIOD_API=v1. Diagnostic: {_gpio_debug_command()}"
+    )
+
+
+def _gpio_chip_number() -> int | None:
+    try:
+        return int(str(GPIO_CHIP), 0)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -190,6 +237,10 @@ GPIO_CHIP = os.getenv("LOONGSON_AOI_GPIO_CHIP", "0")
 DRY_RUN = _env_bool("LOONGSON_AOI_MOTOR_DRY_RUN", False)
 HOME_MODE = os.getenv("LOONGSON_AOI_HOME_MODE", "soft").strip().lower()
 Z_UP_POSITIVE = _env_bool("LOONGSON_AOI_Z_UP_POSITIVE", True)
+GPIOD_API = os.getenv("LOONGSON_AOI_GPIOD_API", "v1").strip().lower()
+MOTOR_GPIO_BACKEND = os.getenv("LOONGSON_AOI_MOTOR_GPIO_BACKEND", "system_python").strip().lower()
+SYSTEM_GPIO_PYTHON = os.getenv("LOONGSON_AOI_SYSTEM_GPIO_PYTHON", "/usr/bin/python3").strip() or "/usr/bin/python3"
+SYSTEM_GPIO_HELPER = Path(os.getenv("LOONGSON_AOI_SYSTEM_GPIO_HELPER", ROOT / "motor_gpio_system_helper.py")).expanduser()
 
 AXES: dict[str, AxisConfig] = {
     "x": _axis_config("X", default_dir=57, default_step=59),
@@ -308,10 +359,7 @@ class GpioSession:
             raise MotorError("python gpiod is not installed; set LOONGSON_AOI_MOTOR_DRY_RUN=1 for simulation.") from exc
 
         self._gpiod = gpiod
-        if hasattr(gpiod, "request_lines"):
-            self._open_v2()
-        else:
-            self._open_v1()
+        self._open_requested_api()
 
         for offset in self._output_offsets:
             self.set_value(offset, 0)
@@ -333,13 +381,53 @@ class GpioSession:
         self._chip = None
         self._lines.clear()
 
+    def _open_requested_api(self) -> None:
+        requested = GPIOD_API if GPIOD_API in {"auto", "v1", "v2"} else "auto"
+        errors: list[tuple[str, BaseException]] = []
+        order = ["v1", "v2"] if requested == "auto" else [requested]
+        for api in order:
+            try:
+                if api == "v1":
+                    self._open_v1()
+                else:
+                    self._open_v2()
+                return
+            except PermissionError as exc:
+                raise MotorError(_gpio_permission_message(exc)) from exc
+            except OSError as exc:
+                if getattr(exc, "errno", None) == 13:
+                    raise MotorError(_gpio_permission_message(exc)) from exc
+                errors.append((api, exc))
+            except (AttributeError, TypeError, ValueError) as exc:
+                errors.append((api, exc))
+
+        if errors:
+            api, exc = errors[-1]
+            detail = "; ".join(f"{item_api}: {item_exc}" for item_api, item_exc in errors)
+            raise MotorError(_gpio_request_message(RuntimeError(detail), api, self._output_offsets, self._input_offsets)) from exc
+        raise MotorError(_gpio_request_message(RuntimeError("no GPIO API attempted"), requested, self._output_offsets, self._input_offsets))
+
     def _open_v1(self) -> None:
         gpiod = self._gpiod
         assert gpiod is not None
-        if str(GPIO_CHIP).isdigit() and hasattr(gpiod.Chip, "OPEN_BY_NUMBER"):
-            self._chip = gpiod.Chip(str(GPIO_CHIP), gpiod.Chip.OPEN_BY_NUMBER)
-        else:
-            self._chip = gpiod.Chip(str(GPIO_CHIP))
+        chip_attempts: list[tuple[Any, ...]] = []
+        chip_number = _gpio_chip_number()
+        if hasattr(gpiod.Chip, "OPEN_BY_NUMBER") and chip_number is not None:
+            chip_attempts.append((str(chip_number), gpiod.Chip.OPEN_BY_NUMBER))
+            chip_attempts.append((chip_number, gpiod.Chip.OPEN_BY_NUMBER))
+        chip_attempts.append((_gpio_chip_path(),))
+        chip_attempts.append((str(GPIO_CHIP),))
+
+        errors: list[BaseException] = []
+        for args in chip_attempts:
+            try:
+                self._chip = gpiod.Chip(*args)
+                break
+            except (OSError, TypeError, ValueError) as exc:
+                errors.append(exc)
+        if self._chip is None:
+            detail = "; ".join(str(error) for error in errors) or "no chip open attempts"
+            raise OSError(detail)
         self._api = "v1"
 
         for offset in sorted(self._output_offsets):
@@ -366,7 +454,7 @@ class GpioSession:
         for offset in sorted(self._input_offsets):
             config[offset] = gpiod.LineSettings(direction=Direction.INPUT)
 
-        chip = f"/dev/gpiochip{GPIO_CHIP}" if str(GPIO_CHIP).isdigit() else str(GPIO_CHIP)
+        chip = _gpio_chip_path()
         self._request = gpiod.request_lines(chip, consumer=CONSUMER, config=config)
         self._api = "v2"
 
@@ -458,6 +546,72 @@ def _validate_target_steps(axis: str, steps: int) -> None:
         raise TravelLimitError(f"{axis.upper()} target {target_mm:.3f} mm is outside 0..{cfg.max_mm:.3f} mm.")
 
 
+def _use_system_python_gpio() -> bool:
+    return not DRY_RUN and MOTOR_GPIO_BACKEND in {"system_python", "system", "external"}
+
+
+def _axis_motion_payload(axis: str, cfg: AxisConfig, sign: int, count: int) -> dict[str, Any]:
+    return {
+        "axis": axis,
+        "direction": sign,
+        "count": count,
+        "channels": [
+            {
+                "dir_offset": channel.dir_offset,
+                "step_offset": channel.step_offset,
+                "dir_value": channel.dir_positive if sign >= 0 else 1 - channel.dir_positive,
+            }
+            for channel in cfg.channels
+        ],
+        "pulse_width_s": cfg.pulse_width_s,
+        "settle_s": cfg.settle_s,
+    }
+
+
+def _run_system_python_motion(
+    configs: list[AxisConfig],
+    signs: dict[str, int],
+    counts: dict[str, int],
+    dominant_cfg: AxisConfig,
+    total_ticks: int,
+    speed_scale: float,
+) -> None:
+    if not SYSTEM_GPIO_HELPER.exists():
+        raise MotorError(f"System GPIO helper not found: {SYSTEM_GPIO_HELPER}")
+
+    payload = {
+        "gpio_chip": GPIO_CHIP,
+        "consumer": CONSUMER,
+        "total_ticks": total_ticks,
+        "speed_scale": speed_scale,
+        "dominant": {
+            "max_speed_mm_s": dominant_cfg.max_speed_mm_s,
+            "start_speed_mm_s": dominant_cfg.start_speed_mm_s,
+            "pulses_per_mm": dominant_cfg.pulses_per_mm,
+            "pulse_width_s": dominant_cfg.pulse_width_s,
+            "ramp_fraction": dominant_cfg.ramp_fraction,
+        },
+        "axes": [
+            _axis_motion_payload(cfg.name, cfg, signs[cfg.name], counts[cfg.name])
+            for cfg in configs
+        ],
+    }
+    try:
+        completed = subprocess.run(
+            shlex.split(SYSTEM_GPIO_PYTHON) + [str(SYSTEM_GPIO_HELPER)],
+            input=json.dumps(payload, ensure_ascii=True),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise MotorError(f"Failed to start system GPIO helper with {SYSTEM_GPIO_PYTHON}: {exc}") from exc
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip()
+        raise MotorError(f"System GPIO helper failed: {message or 'unknown error'}")
+
+
 def _move_axes_to(
     targets: dict[str, int],
     speed_scale: float = 1.0,
@@ -488,6 +642,26 @@ def _move_axes_to(
         "move "
         + ", ".join(f"{axis.upper()} {deltas[axis]} pulses ({deltas[axis] / AXES[axis].pulses_per_mm:.3f} mm)" for axis in deltas)
     )
+
+    if _use_system_python_gpio():
+        try:
+            _run_system_python_motion(configs, signs, counts, dominant_cfg, total_ticks, speed_scale)
+            for axis, target in targets.items():
+                _state.steps[axis] = target
+            if progress_callback is not None:
+                payload = {
+                    "position": get_position(),
+                    "tick": total_ticks,
+                    "total_ticks": total_ticks,
+                    "progress": 1.0,
+                }
+                if segment is not None:
+                    payload["segment"] = dict(segment)
+                progress_callback(payload)
+            time.sleep(max(cfg.settle_s for cfg in configs))
+        finally:
+            _state.save()
+        return get_position()
 
     try:
         with GpioSession(configs) as gpio:
@@ -607,6 +781,10 @@ def get_status() -> dict[str, Any]:
         "driver_mode": "dry_run" if DRY_RUN else "gpiod_tb6600",
         "connected": not DRY_RUN,
         "gpio_chip": GPIO_CHIP,
+        "gpiod_api": GPIOD_API,
+        "gpio_backend": "dry_run" if DRY_RUN else MOTOR_GPIO_BACKEND,
+        "system_gpio_python": SYSTEM_GPIO_PYTHON,
+        "system_gpio_helper": str(SYSTEM_GPIO_HELPER),
         "home_mode": HOME_MODE,
         "state_path": str(STATE_PATH),
         "position": get_position(),

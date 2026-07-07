@@ -15,10 +15,10 @@ const MODE_META = {
   },
   real: {
     label: "真实模式",
-    description: "真实滑台走停、OV9281 抓拍、YOLO 推理和结果回传。",
+    description: "真实滑台固定 16 点走停、OV9281 抓拍、逐格推理并自动拼接扫描窗口。",
     previewTitle: "实时视频",
     previewSource: "OV9281 相机",
-    motionNote: "当前模式会调用滑台驱动，启动前请确认已完成软回原点。",
+    motionNote: "当前模式不要求输入 PCB 长宽；请先调好 Z 轴焦距并保持固定，再执行软回原点。",
   },
   video: {
     label: "视频检测",
@@ -51,6 +51,7 @@ const state = {
   phoneDetectionProfile: "fast",
   detectionPlatform: "huawei_cloud",
   detectionPlatformsStatus: null,
+  detectionQueue: { pending: 0, captured: 0, completed: 0, total: 0, errors: 0 },
   cameraInputMode: "backend",
   browserCameraStream: null,
   browserCameraReady: false,
@@ -148,6 +149,8 @@ const el = {
   videoSpeed: document.getElementById("videoSpeed"),
   videoInferenceFps: document.getElementById("videoInferenceFps"),
   videoOverlap: document.getElementById("videoOverlap"),
+  realMotionSpeed: document.getElementById("realMotionSpeed"),
+  realSettleSeconds: document.getElementById("realSettleSeconds"),
   videoPanelNote: document.querySelector("#videoPanel .inline-note"),
   simulationImageFile: document.getElementById("simulationImageFile"),
   uploadSimulationBtn: document.getElementById("uploadSimulationBtn"),
@@ -183,6 +186,7 @@ const el = {
   xyReadout: document.getElementById("xyReadout"),
   phaseValue: document.getElementById("phaseValue"),
   debounceValue: document.getElementById("debounceValue"),
+  detectQueueValue: document.getElementById("detectQueueValue"),
   progressBar: document.getElementById("progressBar"),
   eventLog: document.getElementById("eventLog"),
   defectList: document.getElementById("defectList"),
@@ -361,9 +365,11 @@ function updateModeUi() {
   const videoMode = false;
   const handheldMode = false;
   const phoneMode = state.mode === "phone";
-  for (const input of [el.pcbLength, el.pcbWidth, el.originX, el.originY]) {
-    input.disabled = videoMode || handheldMode || phoneMode;
-  }
+  const realMode = state.mode === "real";
+  el.pcbLength.disabled = videoMode || handheldMode || phoneMode || realMode;
+  el.pcbWidth.disabled = videoMode || handheldMode || phoneMode || realMode;
+  el.originX.disabled = videoMode || handheldMode || phoneMode;
+  el.originY.disabled = videoMode || handheldMode || phoneMode;
   if (el.videoSpeed) el.videoSpeed.disabled = handheldMode;
   if (el.videoOverlap) el.videoOverlap.disabled = handheldMode;
   if (el.videoPanelNote) {
@@ -383,7 +389,16 @@ function updateModeUi() {
   }
   setPhysicalControlsEnabled(state.mode === "real" && !state.scanning);
   syncCameraInputModeUi();
-  setCommandHint(handheldMode ? "手持模式可直接启动，不要求滑台回零" : phoneMode ? "请选择手机上传照片后开始整图检测" : "等待运行条件检查", "neutral");
+  setCommandHint(
+    handheldMode
+      ? "手持模式可直接启动，不要求滑台回零"
+      : phoneMode
+        ? "请选择手机上传照片后开始整图检测"
+        : realMode
+          ? "真实模式将按固定 16 点扫描；请保持 Z 轴固定"
+          : "等待运行条件检查",
+    "neutral",
+  );
   if (phoneMode) {
     updatePhoneProfileUi();
     refreshPhoneUploads({ preserveSelection: true, selectLatest: false });
@@ -1106,6 +1121,29 @@ async function previewGrid() {
     return;
   }
 
+  if (state.mode === "real") {
+    const params = new URLSearchParams({
+      origin_x_mm: el.originX.value,
+      origin_y_mm: el.originY.value,
+    });
+    try {
+      const response = await fetch(`/api/grid/fixed16-preview?${params}`);
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || "fixed grid preview failed");
+      }
+      state.plan = await response.json();
+      state.results.clear();
+      updatePlanUi();
+      drawCanvas();
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      el.gridMeta.textContent = message;
+      logEvent(`固定 16 点预览失败: ${message}`);
+    }
+    return;
+  }
+
   const params = new URLSearchParams({
     pcb_length_mm: el.pcbLength.value,
     pcb_width_mm: el.pcbWidth.value,
@@ -1539,6 +1577,13 @@ function updatePlanUi() {
   const fov = state.plan.fov_mm || { width: 30, height: 30 };
   const step = state.plan.step_mm || { x: fov.width, y: fov.height };
   const covered = state.plan.covered_mm || { length: state.plan.cols * fov.width, width: state.plan.rows * fov.height };
+  if (state.plan.scan_type === "fixed_points_16") {
+    const imagePx = state.plan.image_px || {};
+    const speedText = state.plan.motion_speed_mm_s ? ` · 速度 ${state.plan.motion_speed_mm_s}mm/s` : "";
+    el.gridMeta.textContent = `固定 16 点 · 步距 ${step.x}mm x ${step.y}mm · 相机 ${imagePx.width || 1280}x${imagePx.height || 800}${speedText} · PCB 尺寸未知 · 拼接后自动估计重叠`;
+    el.xyReadout.textContent = "固定扫描窗口";
+    return;
+  }
   const overlap = Math.round((state.plan.overlap || 0) * 100);
   el.gridMeta.textContent = `FOV ${fov.width}mm x ${fov.height}mm · 步距 ${step.x}mm x ${step.y}mm · 重叠 ${overlap}% · 覆盖 ${covered.length}mm x ${covered.width}mm · 溢出 ${boundary.overflow_right_mm}mm / ${boundary.overflow_bottom_mm}mm`;
 }
@@ -1625,6 +1670,8 @@ function drawDetectionOverlay(ctx, defects, rect, image, tone = "#c43c3c") {
 
 function drawMosaicDetections(ctx, metrics, mosaicImage) {
   if (!state.mosaic || !state.mosaic.defects || !state.mosaic.defects.length || !mosaicImage) return;
+  if (state.mosaic.mosaic_detection_skipped) return;
+  if (state.mosaic.board_crop_raw) return;
   drawDetectionOverlay(
     ctx,
     state.mosaic.defects,
@@ -1640,7 +1687,8 @@ function drawSteppedCanvas(ctx, width, height) {
   const cols = state.plan.cols;
   const rows = state.plan.rows;
   const boundary = state.plan.logical_boundary || {};
-  const mosaicImage = state.mosaic && state.mosaic.mosaic_raw ? cachedArtifactImage(state.mosaic.mosaic_raw) : null;
+  const mosaicPath = state.mosaic && (state.mosaic.board_crop_raw || state.mosaic.mosaic_raw);
+  const mosaicImage = mosaicPath ? cachedArtifactImage(mosaicPath) : null;
 
   ctx.fillStyle = "#e8f3ef";
   ctx.fillRect(ox, oy, boardW, boardH);
@@ -1718,7 +1766,7 @@ function drawSteppedCanvas(ctx, width, height) {
     ctx.fillRect(ox + 10, oy + 10, 138, 22);
     ctx.fillStyle = "#17202a";
     ctx.font = "13px Microsoft YaHei, Segoe UI, sans-serif";
-    ctx.fillText("整板拼接复核图", ox + 18, oy + 26);
+    ctx.fillText(state.mosaic && state.mosaic.board_crop_raw ? "自动裁剪整板图" : "整板拼接复核图", ox + 18, oy + 26);
   }
 }
 
@@ -2186,12 +2234,32 @@ function updateProgress(progress) {
   el.progressBar.style.width = `${Math.max(0, Math.min(100, ratio))}%`;
 }
 
+function updateDetectionQueue(payload) {
+  if (!payload) return;
+  state.detectionQueue = {
+    pending: Number(payload.pending || 0),
+    captured: Number(payload.captured || 0),
+    completed: Number(payload.completed || 0),
+    total: Number(payload.total || 0),
+    errors: Number(payload.errors || 0),
+    active: payload.active || null,
+  };
+  if (el.detectQueueValue) {
+    const active = state.detectionQueue.active
+      ? ` · 检测 ${state.detectionQueue.active.row},${state.detectionQueue.active.col}`
+      : "";
+    const errors = state.detectionQueue.errors ? ` · 错误 ${state.detectionQueue.errors}` : "";
+    el.detectQueueValue.textContent = `${state.detectionQueue.pending} 待检 · ${state.detectionQueue.completed}/${state.detectionQueue.total}${active}${errors}`;
+  }
+}
+
 function resetScanUi() {
   state.currentCell = null;
   state.videoPosition = null;
   state.videoTrail = [];
   state.mosaic = null;
   state.phoneResult = null;
+  state.detectionQueue = { pending: 0, captured: 0, completed: 0, total: 0, errors: 0 };
   state.results.clear();
   state.cellArtifacts.clear();
   state.previewOverride = null;
@@ -2200,6 +2268,7 @@ function resetScanUi() {
   el.progressBar.style.width = "0%";
   el.phaseValue.textContent = "Idle";
   el.debounceValue.textContent = "Ready";
+  if (el.detectQueueValue) el.detectQueueValue.textContent = "0 / 0";
   renderDefects([], 0, 0);
   resetReportPanel();
   drawCanvas();
@@ -2227,6 +2296,10 @@ function handlePacket(packet) {
     case "scan_phase":
       el.phaseValue.textContent = payload.phase || "-";
       if (payload.phase === "debounce") el.debounceValue.textContent = `${payload.duration_ms}ms`;
+      if (payload.phase === "capture_first_frame") el.debounceValue.textContent = "首点先拍";
+      if (payload.phase === "drain_detection_queue") el.debounceValue.textContent = "等待队列清空";
+      if (payload.motion_speed_mm_s) el.debounceValue.textContent = `${payload.motion_speed_mm_s}mm/s`;
+      if (payload.queue) updateDetectionQueue(payload.queue);
       if (payload.x_mm !== undefined) {
         el.xyReadout.textContent = `${payload.x_mm.toFixed(1)}, ${payload.y_mm.toFixed(1)}`;
       }
@@ -2247,15 +2320,22 @@ function handlePacket(packet) {
     case "scan_result":
       state.currentCell = { row: payload.row, col: payload.col };
       rememberCellArtifact(payload);
+      if (payload.queue) updateDetectionQueue(payload.queue);
       updateProgress(payload.progress);
       drawCanvas();
       showCellArtifact(payload.row, payload.col);
       logEvent(`result row=${payload.row} col=${payload.col} ${inferenceLocationLabel(payload)} defects=${(payload.defects || []).length} infer=${payload.inference_ms ? Math.round(payload.inference_ms) : "-"}ms`);
       break;
+    case "detection_queue":
+      updateDetectionQueue(payload);
+      logEvent(`queue pending=${payload.pending || 0} completed=${payload.completed || 0}/${payload.total || 0}`);
+      break;
     case "mosaic_result":
       state.mosaic = payload;
       if (payload.mosaic_raw) cachedArtifactImage(payload.mosaic_raw);
       if (payload.mosaic_annotated) cachedArtifactImage(payload.mosaic_annotated);
+      if (payload.board_crop_raw) cachedArtifactImage(payload.board_crop_raw);
+      if (payload.board_crop_annotated) cachedArtifactImage(payload.board_crop_annotated);
       if (payload.defects && payload.defects.length) {
         state.results.set("mosaic", decorateDefects(payload.defects, {
           raw_image: payload.mosaic_raw,
@@ -2265,11 +2345,16 @@ function handlePacket(packet) {
       }
       renderDefects([], 0, 0);
       drawCanvas();
-      showPreviewImage("整板", "复核", payload.mosaic_annotated || payload.mosaic_raw, "整板拼接复核图");
+      showPreviewImage(
+        "整板",
+        "复核",
+        payload.board_crop_annotated || payload.board_crop_raw || payload.mosaic_annotated || payload.mosaic_raw,
+        payload.board_crop_raw ? "自动裁剪整板图" : "整板拼接复核图",
+      );
       if (payload.scan_id && payload.mosaic_result_json) {
         setReportTarget({ target_type: "mosaic", scan_id: payload.scan_id }, `整板拼接结果 · 缺陷 ${(payload.defects || []).length} 项`);
       }
-      logEvent(`mosaic_result cells=${payload.cell_count || 0} defects=${(payload.defects || []).length} stitch=${payload.stitch_ms ? Math.round(payload.stitch_ms) : "-"}ms`);
+      logEvent(`mosaic_result cells=${payload.cell_count || 0} defects=${(payload.defects || []).length} crop=${payload.board_crop_status || "-"} stitch=${payload.stitch_ms ? Math.round(payload.stitch_ms) : "-"}ms`);
       break;
     case "mosaic_error":
       setCommandHint(payload.message || payload.error || "整板拼接失败", "warn");
@@ -2649,6 +2734,8 @@ async function startScan() {
     pcb_width_mm: Number(el.pcbWidth.value),
     origin_x_mm: Number(el.originX.value),
     origin_y_mm: Number(el.originY.value),
+    motion_speed_mm_s: state.mode === "real" ? Number(el.realMotionSpeed.value || 3) : undefined,
+    settle_seconds: state.mode === "real" ? Number(el.realSettleSeconds.value || 0.05) : undefined,
     image_path: imagePath,
   });
   if (!sent) {

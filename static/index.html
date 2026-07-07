@@ -204,6 +204,16 @@
                 <button class="secondary-btn" id="openBrowserCameraBtn" type="button">打开浏览器相机</button>
                 <button class="secondary-btn" id="captureBrowserFrameBtn" type="button">拍照检测</button>
               </div>
+              <div class="two-col">
+                <label>
+                  <span>滑台速度 mm/s</span>
+                  <input id="realMotionSpeed" type="number" min="0.1" step="0.1" value="3.0" />
+                </label>
+                <label>
+                  <span>停稳时间 s</span>
+                  <input id="realSettleSeconds" type="number" min="0" step="0.01" value="0.05" />
+                </label>
+              </div>
               <p class="inline-note" id="cameraSourceStatus">龙芯常用 0；其他设备可改为 1 或 /dev/video0。</p>
             </section>
 
@@ -328,6 +338,7 @@
               <div class="state-grid">
                 <div><span>阶段</span><strong id="phaseValue">Idle</strong></div>
                 <div><span>消抖</span><strong id="debounceValue">Ready</strong></div>
+                <div><span>待检测队列</span><strong id="detectQueueValue">0 / 0</strong></div>
               </div>
             </section>
           </aside>

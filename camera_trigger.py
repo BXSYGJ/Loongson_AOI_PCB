@@ -154,12 +154,19 @@ PHONE_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_CONFIRM_CONF", 0.5)
 PHONE_MULTI_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF", 0.35)
 PHONE_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_SUSPECTED_CONF", 0.2)
 PHONE_MULTI_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_SUSPECTED_CONF", 0.1)
+MOSAIC_FUSION_IOU = _env_float("LOONGSON_AOI_MOSAIC_FUSION_IOU", 0.45)
+MOSAIC_MIN_RETAINED_RATIO = _env_float("LOONGSON_AOI_MOSAIC_MIN_RETAINED_RATIO", 0.3)
+MOSAIC_CONFLICT_CONF = _env_float("LOONGSON_AOI_MOSAIC_CONFLICT_CONF", 0.25)
 VIDEO_DEFAULT_INFERENCE_FPS = _env_float("LOONGSON_AOI_VIDEO_INFERENCE_FPS", 5.0)
 VIDEO_DEFAULT_PREVIEW_FPS = _env_float("LOONGSON_AOI_VIDEO_PREVIEW_FPS", 8.0)
 CAMERA_SOURCE_FILE = Path(os.getenv("LOONGSON_AOI_CAMERA_SOURCE_FILE", ROOT / "camera_source.txt")).expanduser()
 DEFAULT_CAMERA_SOURCE = "0" if "loong" in platform.machine().lower() else "1"
 ONNX_INPUT_IMGSZ = _env_int("LOONGSON_AOI_ONNX_INPUT_IMGSZ", 0)
 OPENCV_THREADS = _env_int("LOONGSON_AOI_OPENCV_THREADS", 0)
+FIXED_STEP_X_PX = _env_int("LOONGSON_AOI_FIXED_STEP_X_PX", 0)
+FIXED_STEP_Y_PX = _env_int("LOONGSON_AOI_FIXED_STEP_Y_PX", 0)
+FIXED_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 16.0)
+FIXED_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 24.0)
 
 
 def _now_iso() -> str:
@@ -571,13 +578,13 @@ class YoloDetector:
         except Exception:
             pass
 
+        if ONNX_INPUT_IMGSZ > 0:
+            self._onnx_input_imgsz = ONNX_INPUT_IMGSZ
+            return self._onnx_input_imgsz
+
         probed_imgsz = self._probe_onnx_input_imgsz()
         if probed_imgsz:
             self._onnx_input_imgsz = probed_imgsz
-            return self._onnx_input_imgsz
-
-        if ONNX_INPUT_IMGSZ > 0:
-            self._onnx_input_imgsz = ONNX_INPUT_IMGSZ
             return self._onnx_input_imgsz
 
         self._onnx_input_imgsz = self.imgsz
@@ -1207,6 +1214,320 @@ def _nms_detections(detections: list[dict[str, Any]], iou_threshold: float = 0.4
     return sorted(kept, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
 
 
+def _bbox_area(bbox: list[float] | list[int]) -> float:
+    if len(bbox) != 4:
+        return 0.0
+    return max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+
+
+def _normalize_bbox(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        bbox = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return None
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+    return bbox
+
+
+def _clip_bbox(bbox: list[float], clip_rect: list[float]) -> list[float] | None:
+    clipped = [
+        max(float(bbox[0]), float(clip_rect[0])),
+        max(float(bbox[1]), float(clip_rect[1])),
+        min(float(bbox[2]), float(clip_rect[2])),
+        min(float(bbox[3]), float(clip_rect[3])),
+    ]
+    return clipped if _bbox_area(clipped) > 0 else None
+
+
+def _round_bbox(bbox: list[float]) -> list[int]:
+    return [int(round(value)) for value in bbox]
+
+
+def _cell_key(row: Any, col: Any) -> str:
+    return f"{row}:{col}"
+
+
+def _fuse_cell_detections_for_mosaic(
+    manifest: dict[str, Any],
+    placed_cells: list[dict[str, Any]],
+    board_crop: dict[str, Any],
+) -> dict[str, Any]:
+    placements = {
+        _cell_key(cell.get("row"), cell.get("col")): cell
+        for cell in placed_cells
+        if cell.get("row") is not None and cell.get("col") is not None
+    }
+    crop_bbox = board_crop.get("bbox_px") if board_crop.get("status") == "ok" else None
+    crop_rect = None
+    coordinate_space = "mosaic"
+    if isinstance(crop_bbox, list) and len(crop_bbox) == 4:
+        crop_x, crop_y, crop_w, crop_h = [float(value) for value in crop_bbox]
+        if crop_w > 0 and crop_h > 0:
+            crop_rect = [crop_x, crop_y, crop_x + crop_w, crop_y + crop_h]
+            coordinate_space = "board_crop"
+
+    candidates: list[dict[str, Any]] = []
+    discarded: list[dict[str, Any]] = []
+    for cell in manifest.get("cells", []):
+        row = cell.get("row")
+        col = cell.get("col")
+        placement = placements.get(_cell_key(row, col))
+        if placement is None:
+            continue
+        src_crop = placement.get("source_crop_px") or [0, 0, placement.get("width_px", 0), placement.get("height_px", 0)]
+        if not isinstance(src_crop, list) or len(src_crop) != 4:
+            src_crop = [0, 0, placement.get("width_px", 0), placement.get("height_px", 0)]
+        src_x, src_y, src_w, src_h = [float(value) for value in src_crop]
+        source_rect = [src_x, src_y, src_x + src_w, src_y + src_h]
+        dst_x = float(placement.get("x_px", 0))
+        dst_y = float(placement.get("y_px", 0))
+
+        for index, defect in enumerate(cell.get("defects") or []):
+            if not isinstance(defect, dict):
+                continue
+            bbox = _normalize_bbox(defect.get("bbox"))
+            if bbox is None:
+                discarded.append({"row": row, "col": col, "index": index, "reason": "invalid_bbox", "defect": defect})
+                continue
+            bbox_area = _bbox_area(bbox)
+            source_bbox = _clip_bbox(bbox, source_rect)
+            if source_bbox is None:
+                discarded.append({"row": row, "col": col, "index": index, "reason": "outside_retained_source_crop", "defect": defect})
+                continue
+            retained_ratio = _bbox_area(source_bbox) / max(bbox_area, 1e-6)
+            if retained_ratio < MOSAIC_MIN_RETAINED_RATIO:
+                discarded.append(
+                    {
+                        "row": row,
+                        "col": col,
+                        "index": index,
+                        "reason": "mostly_discarded_overlap",
+                        "retained_ratio": round(retained_ratio, 4),
+                        "defect": defect,
+                    }
+                )
+                continue
+
+            mosaic_bbox = [
+                dst_x + source_bbox[0] - src_x,
+                dst_y + source_bbox[1] - src_y,
+                dst_x + source_bbox[2] - src_x,
+                dst_y + source_bbox[3] - src_y,
+            ]
+            output_bbox = mosaic_bbox
+            board_retained_ratio = 1.0
+            if crop_rect is not None:
+                cropped_bbox = _clip_bbox(mosaic_bbox, crop_rect)
+                if cropped_bbox is None:
+                    discarded.append({"row": row, "col": col, "index": index, "reason": "outside_board_crop", "defect": defect})
+                    continue
+                board_retained_ratio = _bbox_area(cropped_bbox) / max(_bbox_area(mosaic_bbox), 1e-6)
+                if board_retained_ratio < MOSAIC_MIN_RETAINED_RATIO:
+                    discarded.append(
+                        {
+                            "row": row,
+                            "col": col,
+                            "index": index,
+                            "reason": "mostly_outside_board_crop",
+                            "retained_ratio": round(board_retained_ratio, 4),
+                            "defect": defect,
+                        }
+                    )
+                    continue
+                output_bbox = [cropped_bbox[0] - crop_rect[0], cropped_bbox[1] - crop_rect[1], cropped_bbox[2] - crop_rect[0], cropped_bbox[3] - crop_rect[1]]
+
+            candidate = dict(defect)
+            candidate["bbox"] = _round_bbox(output_bbox)
+            candidate["mosaic_bbox"] = _round_bbox(mosaic_bbox)
+            candidate["original_bbox"] = _round_bbox(bbox)
+            candidate["source"] = "cell_mosaic_candidate"
+            candidate["coordinate_space"] = coordinate_space
+            candidate["source_cell"] = {
+                "row": row,
+                "col": col,
+                "x_mm": cell.get("x_mm"),
+                "y_mm": cell.get("y_mm"),
+                "raw_image": cell.get("raw_image"),
+                "annotated_image": cell.get("annotated_image"),
+            }
+            candidate["retained_ratio"] = round(min(retained_ratio, board_retained_ratio), 4)
+            candidates.append(candidate)
+
+    clusters: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: float(item.get("confidence", 0.0)), reverse=True):
+        bbox = candidate.get("bbox") or [0, 0, 0, 0]
+        best_cluster: dict[str, Any] | None = None
+        best_iou = 0.0
+        for cluster in clusters:
+            cluster_iou = max(
+                _bbox_iou(bbox, item.get("bbox") or [0, 0, 0, 0])
+                for item in cluster["items"]
+            )
+            if cluster_iou >= MOSAIC_FUSION_IOU and cluster_iou > best_iou:
+                best_iou = cluster_iou
+                best_cluster = cluster
+        if best_cluster is None:
+            clusters.append({"items": [candidate]})
+        else:
+            best_cluster["items"].append(candidate)
+
+    fused: list[dict[str, Any]] = []
+    low_confidence_discarded: list[dict[str, Any]] = []
+    for cluster in clusters:
+        items = sorted(cluster["items"], key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            by_type.setdefault(str(item.get("type") or item.get("label") or ""), []).append(item)
+        primary_type, primary_items = max(
+            by_type.items(),
+            key=lambda pair: (max(float(item.get("confidence", 0.0)) for item in pair[1]), len(pair[1])),
+        )
+        primary_items = sorted(primary_items, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+        best = primary_items[0]
+        support_cells: list[dict[str, Any]] = []
+        seen_cells: set[str] = set()
+        for item in primary_items:
+            source_cell = item.get("source_cell") or {}
+            key = _cell_key(source_cell.get("row"), source_cell.get("col"))
+            if key in seen_cells:
+                continue
+            seen_cells.add(key)
+            support_cells.append(source_cell)
+
+        confidences = [float(item.get("confidence", 0.0)) for item in primary_items]
+        max_confidence = max(confidences, default=0.0)
+        mean_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        support_count = len(support_cells)
+        evidence_score = min(0.99, max_confidence + 0.05 * max(0, support_count - 1))
+        if max_confidence >= PHONE_CONFIRM_CONF or (support_count >= 2 and max_confidence >= PHONE_MULTI_CONFIRM_CONF):
+            decision = "confirmed"
+        elif max_confidence >= PHONE_SUSPECTED_CONF or (support_count >= 2 and max_confidence >= PHONE_MULTI_SUSPECTED_CONF):
+            decision = "suspected"
+        else:
+            decision = "discarded"
+
+        conflict_alternatives: list[dict[str, Any]] = []
+        for defect_type, type_items in by_type.items():
+            if defect_type == primary_type:
+                continue
+            alt_best = max(type_items, key=lambda item: float(item.get("confidence", 0.0)))
+            if float(alt_best.get("confidence", 0.0)) >= MOSAIC_CONFLICT_CONF:
+                conflict_alternatives.append(
+                    {
+                        "type": alt_best.get("type"),
+                        "label": alt_best.get("label") or alt_best.get("type"),
+                        "confidence": round(float(alt_best.get("confidence", 0.0)), 4),
+                        "bbox": alt_best.get("bbox"),
+                        "mosaic_bbox": alt_best.get("mosaic_bbox"),
+                        "support_count": len(type_items),
+                    }
+                )
+
+        fused_item = {
+            "type": best.get("type"),
+            "label": best.get("label") or best.get("type"),
+            "bbox": best.get("bbox"),
+            "mosaic_bbox": best.get("mosaic_bbox"),
+            "confidence": round(evidence_score, 4),
+            "max_confidence": round(max_confidence, 4),
+            "mean_confidence": round(mean_confidence, 4),
+            "support_count": support_count,
+            "support_cells": support_cells,
+            "decision": decision,
+            "source": "cell_mosaic_fusion",
+            "coordinate_space": coordinate_space,
+            "has_conflict": bool(conflict_alternatives),
+            "conflict_alternatives": conflict_alternatives,
+            "source_candidates": [
+                {
+                    "type": item.get("type"),
+                    "label": item.get("label") or item.get("type"),
+                    "confidence": item.get("confidence"),
+                    "bbox": item.get("bbox"),
+                    "mosaic_bbox": item.get("mosaic_bbox"),
+                    "source_cell": item.get("source_cell"),
+                    "retained_ratio": item.get("retained_ratio"),
+                }
+                for item in items
+            ],
+        }
+        if crop_rect is not None:
+            fused_item["board_crop_bbox_px"] = _round_bbox(crop_rect)
+
+        if decision == "discarded":
+            low_confidence_discarded.append(fused_item)
+        else:
+            fused.append(fused_item)
+
+    fused = sorted(fused, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+    return {
+        "detections": fused,
+        "audit": {
+            "strategy": "cell_to_mosaic_coordinate_fusion",
+            "coordinate_space": coordinate_space,
+            "fusion_rules": {
+                "iou_threshold": MOSAIC_FUSION_IOU,
+                "min_retained_ratio": MOSAIC_MIN_RETAINED_RATIO,
+                "conflict_conf": MOSAIC_CONFLICT_CONF,
+                "confirm_conf": PHONE_CONFIRM_CONF,
+                "multi_confirm_conf": PHONE_MULTI_CONFIRM_CONF,
+                "suspected_conf": PHONE_SUSPECTED_CONF,
+                "multi_suspected_conf": PHONE_MULTI_SUSPECTED_CONF,
+            },
+            "candidate_count": len(candidates),
+            "fused_count": len(fused),
+            "discarded_count": len(discarded) + len(low_confidence_discarded),
+            "candidates": candidates,
+            "discarded_defects": discarded + low_confidence_discarded,
+            "board_crop": board_crop,
+        },
+    }
+
+
+def _remap_mosaic_detections_for_crop(detections: list[dict[str, Any]], board_crop: dict[str, Any]) -> list[dict[str, Any]]:
+    crop_bbox = board_crop.get("bbox_px") if board_crop.get("status") == "ok" else None
+    if not isinstance(crop_bbox, list) or len(crop_bbox) != 4:
+        return [
+            {
+                **dict(detection),
+                "coordinate_space": detection.get("coordinate_space") or "mosaic",
+                "source": detection.get("source") or "mosaic_detection",
+            }
+            for detection in detections
+            if isinstance(detection, dict)
+        ]
+
+    crop_x, crop_y, crop_w, crop_h = [float(value) for value in crop_bbox]
+    if crop_w <= 0 or crop_h <= 0:
+        return detections
+    crop_rect = [crop_x, crop_y, crop_x + crop_w, crop_y + crop_h]
+    remapped: list[dict[str, Any]] = []
+    for detection in detections:
+        if not isinstance(detection, dict):
+            continue
+        bbox = _normalize_bbox(detection.get("bbox"))
+        if bbox is None:
+            continue
+        clipped = _clip_bbox(bbox, crop_rect)
+        if clipped is None:
+            continue
+        retained_ratio = _bbox_area(clipped) / max(_bbox_area(bbox), 1e-6)
+        if retained_ratio < MOSAIC_MIN_RETAINED_RATIO:
+            continue
+        item = dict(detection)
+        item["mosaic_bbox"] = _round_bbox(bbox)
+        item["bbox"] = _round_bbox([clipped[0] - crop_x, clipped[1] - crop_y, clipped[2] - crop_x, clipped[3] - crop_y])
+        item["coordinate_space"] = "board_crop"
+        item["board_crop_bbox_px"] = _round_bbox(crop_rect)
+        item["source"] = item.get("source") or "mosaic_detection"
+        item["retained_ratio"] = round(retained_ratio, 4)
+        remapped.append(item)
+    return remapped
+
+
 def _profile_key(profile: dict[str, Any]) -> str:
     return f"{int(profile.get('tile_size', 0))}@{int(profile.get('imgsz', 0))}"
 
@@ -1314,6 +1635,268 @@ def _fuse_profile_detections(
     }
 
 
+def _is_auto_crop_manifest(manifest: dict[str, Any]) -> bool:
+    plan = manifest.get("plan") or {}
+    return plan.get("mosaic_mode") == "auto_crop_overlap" or plan.get("scan_type") == "fixed_points_16"
+
+
+def _gray_small(image: Any) -> tuple[Any, float]:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    height, width = gray.shape[:2]
+    scale = min(1.0, 320.0 / max(width, height))
+    if scale < 1.0:
+        gray = cv2.resize(
+            gray,
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    return gray.astype(np.float32), scale
+
+
+def _translation_score(first: Any, second: Any, axis: str, step: int) -> float:
+    import numpy as np  # type: ignore[import-not-found]
+
+    if axis == "x":
+        first_patch = first[:, step:]
+        second_patch = second[:, : first.shape[1] - step]
+    else:
+        first_patch = first[step:, :]
+        second_patch = second[: first.shape[0] - step, :]
+    if first_patch.size < 64 or second_patch.size < 64:
+        return -1.0
+    first_norm = first_patch - float(first_patch.mean())
+    second_norm = second_patch - float(second_patch.mean())
+    denominator = float(np.linalg.norm(first_norm) * np.linalg.norm(second_norm))
+    if denominator <= 1e-6:
+        return -1.0
+    return float((first_norm * second_norm).sum() / denominator)
+
+
+def _estimate_pair_step_px(first_image: Any, second_image: Any, axis: str) -> tuple[int, float]:
+    first_small, scale = _gray_small(first_image)
+    second_small, _ = _gray_small(second_image)
+    limit = first_small.shape[1] if axis == "x" else first_small.shape[0]
+    min_step = max(1, int(round(limit * 0.03)))
+    max_step = max(min_step + 1, int(round(limit * 0.92)))
+    best_step = min_step
+    best_score = -1.0
+    for step in range(min_step, max_step):
+        score = _translation_score(first_small, second_small, axis, step)
+        if score > best_score:
+            best_score = score
+            best_step = step
+    return max(1, int(round(best_step / max(scale, 1e-6)))), best_score
+
+
+def _estimate_axis_step_px(
+    cells: list[dict[str, Any]],
+    images: dict[str, Any],
+    axis: str,
+) -> tuple[int | None, float, list[dict[str, Any]]]:
+    import numpy as np  # type: ignore[import-not-found]
+
+    manual = FIXED_STEP_X_PX if axis == "x" else FIXED_STEP_Y_PX
+    if manual > 0:
+        return int(manual), 1.0, [{"source": "manual_env", "step_px": int(manual), "score": 1.0}]
+
+    group_key = "y_mm" if axis == "x" else "x_mm"
+    sort_key = "x_mm" if axis == "x" else "y_mm"
+    groups: dict[float, list[dict[str, Any]]] = {}
+    for cell in cells:
+        groups.setdefault(round(float(cell.get(group_key, 0.0)), 4), []).append(cell)
+
+    estimates: list[int] = []
+    scored_pairs: list[float] = []
+    pair_details: list[dict[str, Any]] = []
+    for group_cells in groups.values():
+        ordered = sorted(group_cells, key=lambda item: float(item.get(sort_key, 0.0)))
+        for first, second in zip(ordered, ordered[1:]):
+            first_image = images.get(str(first.get("raw_image")))
+            second_image = images.get(str(second.get("raw_image")))
+            if first_image is None or second_image is None:
+                continue
+            step_px, score = _estimate_pair_step_px(first_image, second_image, axis)
+            if score >= 0.45:
+                estimates.append(step_px)
+                scored_pairs.append(score)
+            pair_details.append(
+                {
+                    "axis": axis,
+                    "from": {"row": first.get("row"), "col": first.get("col")},
+                    "to": {"row": second.get("row"), "col": second.get("col")},
+                    "step_px": int(step_px),
+                    "score": round(score, 4),
+                }
+            )
+
+    if not estimates:
+        return None, 0.0, pair_details
+    return (
+        int(round(float(np.median(np.array(estimates, dtype=np.float32))))),
+        round(float(np.median(np.array(scored_pairs, dtype=np.float32))), 4),
+        pair_details,
+    )
+
+
+def _detect_board_crop(image: Any) -> dict[str, Any]:
+    cv2 = _import_cv2()
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return {"status": "not_found", "reason": "no_contours"}
+
+    height, width = gray.shape[:2]
+    image_area = float(width * height)
+    contour = max(contours, key=cv2.contourArea)
+    area = float(cv2.contourArea(contour))
+    if area < image_area * 0.08:
+        return {"status": "not_found", "reason": "largest_contour_too_small", "area_ratio": round(area / image_area, 4)}
+
+    x, y, crop_width, crop_height = cv2.boundingRect(contour)
+    if crop_width <= 0 or crop_height <= 0:
+        return {"status": "failed", "reason": "invalid_bbox"}
+    margin = max(2, int(round(min(width, height) * 0.01)))
+    x1 = max(0, x - margin)
+    y1 = max(0, y - margin)
+    x2 = min(width, x + crop_width + margin)
+    y2 = min(height, y + crop_height + margin)
+    crop_area = float((x2 - x1) * (y2 - y1))
+    return {
+        "status": "ok",
+        "bbox_px": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+        "area_ratio": round(crop_area / image_area, 4),
+        "threshold": "otsu",
+        "confidence": round(min(1.0, max(0.0, area / max(1.0, crop_area))), 4),
+    }
+
+
+def _build_auto_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    cells = [cell for cell in manifest.get("cells", []) if cell.get("raw_image")]
+    if not cells:
+        raise CameraTriggerError("No captured raw images found in scan manifest.")
+
+    images: dict[str, Any] = {}
+    first_image = None
+    for cell in cells:
+        raw_image = str(cell["raw_image"])
+        image = cv2.imread(str(resolve_artifact(raw_image)))
+        if image is None:
+            continue
+        images[raw_image] = image
+        if first_image is None:
+            first_image = image
+    if first_image is None:
+        raise CameraTriggerError("Could not read captured raw images for auto-crop mosaic.")
+
+    tile_height, tile_width = first_image.shape[:2]
+    step_x_px, score_x, x_pairs = _estimate_axis_step_px(cells, images, "x")
+    step_y_px, score_y, y_pairs = _estimate_axis_step_px(cells, images, "y")
+    if step_x_px is None or step_y_px is None:
+        raise CameraTriggerError(
+            "Could not estimate overlap from adjacent images. Set LOONGSON_AOI_FIXED_STEP_X_PX and "
+            "LOONGSON_AOI_FIXED_STEP_Y_PX as a manual fallback."
+        )
+
+    plan = manifest.get("plan") or {}
+    step_mm = plan.get("step_mm") or {"x": FIXED_STEP_X_MM, "y": FIXED_STEP_Y_MM}
+    step_x_mm = float(step_mm.get("x", FIXED_STEP_X_MM))
+    step_y_mm = float(step_mm.get("y", FIXED_STEP_Y_MM))
+    origin = plan.get("origin_mm") or {"x": 0.0, "y": 0.0}
+    origin_x_mm = float(origin.get("x", 0.0))
+    origin_y_mm = float(origin.get("y", 0.0))
+    px_per_mm_x = step_x_px / max(step_x_mm, 1e-6)
+    px_per_mm_y = step_y_px / max(step_y_mm, 1e-6)
+
+    for cell in cells:
+        cell["_origin_px"] = {
+            "x": int(round((float(cell.get("x_mm", 0.0)) - origin_x_mm) * px_per_mm_x)),
+            "y": int(round((float(cell.get("y_mm", 0.0)) - origin_y_mm) * px_per_mm_y)),
+        }
+
+    max_right = max(int(cell["_origin_px"]["x"]) + tile_width for cell in cells)
+    max_bottom = max(int(cell["_origin_px"]["y"]) + tile_height for cell in cells)
+    mosaic = np.zeros((max_bottom, max_right, 3), dtype=np.uint8)
+    filled = np.zeros((max_bottom, max_right), dtype=np.uint8)
+    x_origins = sorted({int(cell["_origin_px"]["x"]) for cell in cells})
+    y_origins = sorted({int(cell["_origin_px"]["y"]) for cell in cells})
+    x_index = {value: index for index, value in enumerate(x_origins)}
+    y_index = {value: index for index, value in enumerate(y_origins)}
+    placed_cells: list[dict[str, Any]] = []
+
+    def crop_bounds(origin_px: int, origins: list[int], index: int, tile_size: int) -> tuple[int, int]:
+        center = origin_px + tile_size / 2.0
+        left = origin_px if index == 0 else int(round(((origins[index - 1] + tile_size / 2.0) + center) / 2.0))
+        right = origin_px + tile_size if index == len(origins) - 1 else int(round((center + (origins[index + 1] + tile_size / 2.0)) / 2.0))
+        return max(origin_px, left), min(origin_px + tile_size, right)
+
+    for cell in cells:
+        raw_image = str(cell["raw_image"])
+        image = images.get(raw_image)
+        if image is None:
+            continue
+        if image.shape[1] != tile_width or image.shape[0] != tile_height:
+            image = cv2.resize(image, (tile_width, tile_height), interpolation=cv2.INTER_AREA)
+        x0 = int(cell["_origin_px"]["x"])
+        y0 = int(cell["_origin_px"]["y"])
+        x1, x2 = crop_bounds(x0, x_origins, x_index[x0], tile_width)
+        y1, y2 = crop_bounds(y0, y_origins, y_index[y0], tile_height)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        src_x1 = x1 - x0
+        src_y1 = y1 - y0
+        src_x2 = src_x1 + (x2 - x1)
+        src_y2 = src_y1 + (y2 - y1)
+        mosaic[y1:y2, x1:x2] = image[src_y1:src_y2, src_x1:src_x2]
+        filled[y1:y2, x1:x2] = 1
+        placed_cells.append(
+            {
+                "row": cell.get("row"),
+                "col": cell.get("col"),
+                "x_px": x1,
+                "y_px": y1,
+                "width_px": x2 - x1,
+                "height_px": y2 - y1,
+                "source_crop_px": [int(src_x1), int(src_y1), int(src_x2 - src_x1), int(src_y2 - src_y1)],
+                "raw_image": cell.get("raw_image"),
+                "annotated_image": cell.get("annotated_image"),
+            }
+        )
+
+    if not placed_cells:
+        raise CameraTriggerError("No captured cells could be placed into the auto-crop mosaic.")
+    if np.any(filled == 0):
+        mask = filled > 0
+        if np.any(mask):
+            ys, xs = np.where(mask)
+            mosaic = mosaic[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1]
+
+    geometry = {
+        "mode": "auto_crop_overlap",
+        "tile_px": {"width": tile_width, "height": tile_height},
+        "canvas_px": {"width": int(mosaic.shape[1]), "height": int(mosaic.shape[0])},
+        "estimated_step_px": {"x": int(step_x_px), "y": int(step_y_px)},
+        "estimated_px_per_mm": {"x": round(px_per_mm_x, 6), "y": round(px_per_mm_y, 6)},
+        "estimated_fov_mm": {
+            "width": round(tile_width / max(px_per_mm_x, 1e-6), 4),
+            "height": round(tile_height / max(px_per_mm_y, 1e-6), 4),
+        },
+        "stitch_confidence": round(min(score_x, score_y), 4),
+        "axis_pair_scores": {"x": x_pairs, "y": y_pairs},
+        "pcb_size_known": False,
+        "step_mm": {"x": step_x_mm, "y": step_y_mm},
+    }
+    return mosaic, geometry, placed_cells
+
+
 def _mosaic_geometry(manifest: dict[str, Any], tile_width: int, tile_height: int) -> dict[str, Any]:
     plan = manifest.get("plan") or {}
     fov = plan.get("fov_mm") or {"width": 30.0, "height": 30.0}
@@ -1399,6 +1982,7 @@ def _build_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], 
                 "y_px": dst_y1,
                 "width_px": dst_x2 - dst_x1,
                 "height_px": dst_y2 - dst_y1,
+                "source_crop_px": [int(src_x1), int(src_y1), int(src_x2 - src_x1), int(src_y2 - src_y1)],
                 "raw_image": cell.get("raw_image"),
                 "annotated_image": cell.get("annotated_image"),
             }
@@ -1470,6 +2054,7 @@ def _build_pixel_restored_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, d
                 "y_px": y1,
                 "width_px": expected_width,
                 "height_px": expected_height,
+                "source_crop_px": [0, 0, int(expected_width), int(expected_height)],
                 "raw_image": cell.get("raw_image"),
                 "annotated_image": cell.get("annotated_image"),
                 "simulation_crop": crop_meta,
@@ -1535,8 +2120,18 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
     start = time.perf_counter()
     manifest = _load_scan_manifest(scan_id)
     pixel_restore = _is_pixel_restore_manifest(manifest)
+    auto_crop_status = "not_used"
     if pixel_restore:
         mosaic, geometry, placed_cells = _build_pixel_restored_mosaic_image(manifest)
+    elif _is_auto_crop_manifest(manifest):
+        try:
+            mosaic, geometry, placed_cells = _build_auto_crop_mosaic_image(manifest)
+            auto_crop_status = "ok"
+        except CameraTriggerError as exc:
+            mosaic, geometry, placed_cells = _build_mosaic_image(manifest)
+            geometry["mode"] = "fixed_points_contact_sheet_fallback"
+            geometry["auto_crop_error"] = str(exc)
+            auto_crop_status = "failed"
     else:
         mosaic, geometry, placed_cells = _build_mosaic_image(manifest)
     cv2 = _import_cv2()
@@ -1547,8 +2142,13 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
     annotated_path = mosaic_dir / "mosaic_annotated.jpg"
     result_json_path = mosaic_dir / "mosaic_result.json"
     mosaic_manifest_path = mosaic_dir / "mosaic_manifest.json"
+    cell_defect_audit_path = mosaic_dir / "cell_defect_audit.json"
+    board_crop_raw_path = mosaic_dir / "board_crop_raw.jpg"
+    board_crop_annotated_path = mosaic_dir / "board_crop_annotated.jpg"
+    board_crop_metadata_path = mosaic_dir / "board_crop_metadata.json"
 
     detections: list[dict[str, Any]] = []
+    cell_defect_audit: dict[str, Any] = {}
     inference_ms = 0.0
     annotated = mosaic.copy()
     if run_detection:
@@ -1559,20 +2159,58 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
             for detection in detections:
                 draw_detection(annotated, detection["bbox"], str(detection.get("label") or detection.get("type")), float(detection.get("confidence", 0.0)))
 
+    board_crop = _detect_board_crop(mosaic)
+    if run_detection:
+        detections = _remap_mosaic_detections_for_crop(detections, board_crop)
+        cell_defect_audit = {
+            "strategy": "mosaic_detection",
+            "coordinate_space": "board_crop" if board_crop.get("status") == "ok" else "mosaic",
+            "fused_count": len(detections),
+            "board_crop": board_crop,
+        }
+    else:
+        fusion = _fuse_cell_detections_for_mosaic(manifest, placed_cells, board_crop)
+        detections = list(fusion["detections"])
+        cell_defect_audit = dict(fusion["audit"])
+        for detection in detections:
+            draw_bbox = detection.get("mosaic_bbox") or detection.get("bbox")
+            if not draw_bbox:
+                continue
+            label = str(detection.get("label") or detection.get("type"))
+            if detection.get("has_conflict"):
+                label = f"conflict {label}"
+            color = (0, 170, 255) if detection.get("decision") == "suspected" else (0, 180, 0)
+            if detection.get("has_conflict"):
+                color = (0, 80, 255)
+            draw_detection(annotated, draw_bbox, label, float(detection.get("confidence", 0.0)), color=color)
+
     cv2.imwrite(str(raw_path), mosaic)
     cv2.imwrite(str(annotated_path), annotated)
+    if board_crop.get("status") == "ok":
+        x, y, width, height = [int(value) for value in board_crop["bbox_px"]]
+        cv2.imwrite(str(board_crop_raw_path), mosaic[y : y + height, x : x + width])
+        cv2.imwrite(str(board_crop_annotated_path), annotated[y : y + height, x : x + width])
+        board_crop["board_crop_raw"] = _rel(board_crop_raw_path)
+        board_crop["board_crop_annotated"] = _rel(board_crop_annotated_path)
+    with board_crop_metadata_path.open("w", encoding="utf-8") as file:
+        json.dump(board_crop, file, ensure_ascii=False, indent=2)
     with result_json_path.open("w", encoding="utf-8") as file:
         json.dump(detections, file, ensure_ascii=False, indent=2)
+    with cell_defect_audit_path.open("w", encoding="utf-8") as file:
+        json.dump(cell_defect_audit, file, ensure_ascii=False, indent=2)
     with mosaic_manifest_path.open("w", encoding="utf-8") as file:
         json.dump(
             {
                 "scan_id": scan_id,
                 "created_at": _now_iso(),
                 "geometry": geometry,
+                "auto_crop_status": auto_crop_status,
                 "cells": placed_cells,
                 "mosaic_raw": _rel(raw_path),
                 "mosaic_annotated": _rel(annotated_path),
                 "mosaic_result_json": _rel(result_json_path),
+                "cell_defect_audit": _rel(cell_defect_audit_path),
+                "board_crop": board_crop,
             },
             file,
             ensure_ascii=False,
@@ -1586,6 +2224,12 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
         "mosaic_annotated": _rel(annotated_path),
         "mosaic_result_json": _rel(result_json_path),
         "mosaic_manifest": _rel(mosaic_manifest_path),
+        "cell_defect_audit": _rel(cell_defect_audit_path),
+        "board_crop_status": board_crop.get("status", "failed"),
+        "board_crop_raw": board_crop.get("board_crop_raw"),
+        "board_crop_annotated": board_crop.get("board_crop_annotated"),
+        "board_crop_metadata": _rel(board_crop_metadata_path),
+        "auto_crop_status": auto_crop_status,
         "defects": detections,
         "cell_count": len(placed_cells),
         "stitch_ms": round((time.perf_counter() - start) * 1000.0, 2),

@@ -1,0 +1,17 @@
+[Unit]
+Description=Loongson AOI cloud backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Loongson_AOI_PCB/cloud-backend
+ExecStart=/bin/bash -lc 'source /root/Loongson_AOI_PCB/cloud-backend/.env && exec /root/Loongson_AOI_PCB/cloud-backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8010'
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
