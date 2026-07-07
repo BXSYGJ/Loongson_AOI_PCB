@@ -1,58 +1,71 @@
 # Loongson AOI PCB - Cloud Cooperative Platform
 
-This branch contains the cloud-cooperative web console for the PCB AOI workflow.
-It is derived from the phone-browser-inference branch, but the detection
-priority is now:
+This branch contains the current cloud-cooperative web console for the PCB AOI
+workflow. It is the main branch to run on Windows, Huawei Cloud ECS, or the
+Loongson Education board when coordinating the complete AOI demo.
+
+The runtime now separates **operation mode** from **detection platform**:
 
 ```text
-Huawei Cloud ECS detection > same-LAN phone/browser inference > local computer or Loongson board fallback
+Operation mode: simulation | real | phone
+Detection platform: Huawei Cloud | phone/browser worker | local OpenCV DNN
 ```
 
-The Loongson Education board is still responsible for real-mode slide-table
-movement and OV9281 capture. Defect inference is offloaded whenever possible,
-with local board inference kept as the lowest-priority fallback.
+The user explicitly selects the detection platform at the top of each mode.
+Detection failures do not silently switch to another platform; the UI reports
+the failure and the user can select a different platform.
+
+The Loongson Education board is responsible for real-mode slide-table movement
+and OV9281 capture. Defect inference is handled by the platform selected in the
+UI: Huawei Cloud, a same-LAN phone/browser worker, or local OpenCV DNN on the
+machine running the website.
 
 The branch connects:
 
 - OV9281 camera capture and MJPEG preview
 - Huawei Cloud ECS + OBS ONNX detection
 - same-LAN phone/browser ONNX inference worker
-- local OpenCV DNN fallback detection
+- local OpenCV DNN detection platform
 - XYZ slide-table scan orchestration
 - WebSocket event updates for the browser UI
-- Handheld, simulated, real stepped-scan, continuous video scan, and phone-upload workflows
+- simulation, real fixed-point scan, and phone-upload workflows
 
 The current UI is designed as a white industrial control panel. It is the branch
 to run when you want the local website to coordinate camera/slide-table control
-while sending detection jobs to Huawei Cloud first.
+and explicitly choose whether detection runs on Huawei Cloud, a phone/browser
+worker, or the local backend host.
 
 ## Main Files
 
 | File                    | Purpose                                                               |
 | ----------------------- | --------------------------------------------------------------------- |
 | `main.py`             | FastAPI app, WebSocket control protocol, scan orchestration           |
-| `camera_trigger.py`   | Camera manager, YOLO detector, still capture, video detection session |
+| `camera_trigger.py`   | Camera manager, OpenCV DNN/ONNX detector, still capture, mosaic fusion |
 | `motor_controller.py` | UI-side motor interface used by scan commands                         |
 | `static/index.html`   | Browser shell                                                         |
 | `static/app.js`       | Frontend state machine, WebSocket client, mode logic                  |
 | `static/styles.css`   | White industrial UI styling                                           |
 | `requirements.txt`    | Python runtime dependencies                                           |
+| `cloud-backend/`      | Huawei Cloud ECS + OBS async detection service                        |
+| `miniprogram/`        | WeChat mini program aligned with the phone web page                   |
 
 ## Modes
 
-| Mode               | Hardware Needed             | Behavior                                                                                                             |
-| ------------------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Handheld detection | Camera + YOLO               | No slide movement. The camera can be moved by hand and the video stream shows live YOLO boxes.                       |
-| Simulation mode    | Existing PCB image          | Upload one or more PCB images and simulate a snake-grid slide scan over the image.                                   |
-| Real mode          | Camera + slide table + YOLO | Step the slide to each grid cell, settle, capture one image, run YOLO, then move to the next cell.                   |
-| Video detection    | Camera + slide table + YOLO | Continuous snake scan with live YOLO video and a moving FOV box on the PCB board.                                    |
-| Phone photo        | Phone or desktop browser     | Upload phone photos, convert color images to grayscale, then detect through cloud, phone worker, or local fallback. |
+| Mode            | Hardware Needed                     | Behavior                                                                                                       |
+| --------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Simulation mode | Existing PCB image                  | Import a PCB image, simulate a stepped scan, fill the board view, then build a restored mosaic for review.      |
+| Real mode       | OV9281 + slide table                | Capture the first point immediately, then move through a fixed 16-point scan, capture each point, and mosaic.   |
+| Phone photo     | Phone or desktop browser image input | Upload or capture a PCB photo, convert color input to grayscale, and run whole-image detection.                 |
 
-All five modes use the same detection scheduler. If
-`LOONGSON_AOI_CLOUD_API_BASE` is configured and reachable, the raw captured or
-uploaded image is sent to Huawei Cloud first. If cloud detection is unavailable,
-the website tries the same-LAN phone/browser inference worker. If that is also
-unavailable, it falls back to local OpenCV DNN inference.
+Each mode carries `detection_platform` in its request payload:
+
+- `huawei_cloud`: send the image to the ECS/OBS backend.
+- `phone_browser`: use a connected phone/browser inference worker.
+- `local_dnn`: run `best.onnx` through OpenCV DNN on the current backend host.
+
+The current implementation avoids automatic platform fallback. This makes
+competition demos easier to explain because every result clearly states which
+platform produced it.
 
 ## Quick Start on Windows
 
@@ -61,36 +74,36 @@ From this branch checkout:
 ```powershell
 cd D:\AAAED\code\Loongson_AOI_PCB
 python -m pip install -r requirements.txt
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+python -m uvicorn main:app --host 127.0.0.1 --port 8020
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8000/
+http://127.0.0.1:8020/
 ```
 
 For LAN phone upload, bind to all interfaces:
 
 ```powershell
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --host 0.0.0.0 --port 8020
 ```
 
 Then open the full UI or the phone-only upload page from the phone:
 
 ```text
-http://<computer-lan-ip>:8000/
-http://<computer-lan-ip>:8000/phone
+http://<computer-lan-ip>:8020/
+http://<computer-lan-ip>:8020/phone
 ```
 
-If port `8000` is already occupied, either close the old server or use another
+If port `8020` is already occupied, either close the old server or use another
 port:
 
 ```powershell
-python -m uvicorn main:app --host 127.0.0.1 --port 8001
+python -m uvicorn main:app --host 127.0.0.1 --port 8021
 ```
 
-Then open `http://127.0.0.1:8001/`.
+Then open `http://127.0.0.1:8021/`.
 
 ## Camera Source
 
@@ -114,7 +127,7 @@ Option 2: set an environment variable before starting the server:
 $env:LOONGSON_AOI_CAMERA_SOURCE = "0"
 # Or, on another device:
 $env:LOONGSON_AOI_CAMERA_SOURCE = "1"
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+python -m uvicorn main:app --host 127.0.0.1 --port 8020
 ```
 
 Useful camera variables:
@@ -160,7 +173,7 @@ Passing a `.pt` path and `LOONGSON_AOI_DETECTOR_BACKEND=ultralytics` still works
 on development machines that have `torch` and `ultralytics`, but it is not the
 recommended board runtime.
 
-## Huawei Cloud Detection Priority
+## Huawei Cloud Detection Platform
 
 Configure the local website to use the Huawei Cloud backend before starting
 Uvicorn:
@@ -175,15 +188,18 @@ $env:LOONGSON_AOI_CLOUD_POLL_SECONDS = "0.35"
 Then start the website:
 
 ```powershell
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --host 0.0.0.0 --port 8020
 ```
 
-`GET /api/system/status` reports the active detection priority and cloud
-configuration:
+`GET /api/system/status` reports platform availability and cloud configuration:
 
 ```json
 {
-  "detection_priority": ["huawei_cloud", "phone_browser", "local_fallback"],
+  "detection_platforms": {
+    "huawei_cloud": {"available": true},
+    "phone_browser": {"available": false},
+    "local_dnn": {"available": true}
+  },
   "cloud_detection": {
     "enabled": true,
     "configured": true,
@@ -194,7 +210,7 @@ configuration:
 
 Huawei Cloud results are written back into the same local output layout as local
 detection. This keeps the UI, manifest, mosaic, and artifact viewer compatible
-with the existing simulation, real, video, and phone workflows.
+with simulation, real, and phone workflows.
 
 ## Loongson 2K1000LA Simulation-First Deployment
 
@@ -222,7 +238,7 @@ Copy `dist\loongson_phone_bundle.zip` to `~/Documents` on the board, unzip it,
 then run:
 
 ```sh
-cd ~/Documents/Loongson_AOI_PCB/worktrees/ui-integration
+cd ~/Documents/Loongson_AOI_PCB/worktrees/cloud-cooperative-platform
 sh deploy/loongson/install_phone_deps.sh
 sh deploy/loongson/check_phone_runtime.sh
 sh deploy/loongson/run_phone_server.sh
@@ -238,35 +254,32 @@ LOONGSON_AOI_SIMULATION_JPEG_QUALITY=82
 ```
 
 It also starts Uvicorn through `nice -n 10` by default so ONNX inference has a
-lower chance of starving the SSH/FinalShell session. After opening
-`http://<board-ip>:8000/`, enter simulation mode, import a `640x640` image or a
+lower chance of starving the SSH/FinalShell session. The board script defaults
+to port `8000`; set `AOI_PORT=8020` before running it if you want the same port
+as the ECS/Windows demo. After opening `http://<board-ip>:8000/` or
+`http://<board-ip>:8020/`, enter simulation mode, import a `640x640` image or a
 PCB image with long side no larger than `960`, set PCB length/width to
 `30mm x 30mm`, then start detection.
 
-## Phone Browser Inference Fallback
+## Phone Browser Inference Worker
 
 The phone module remains useful in two ways:
 
-- as the fifth mode for taking or selecting PCB photos and sending them to the
-  cloud platform;
-- as a same-LAN browser inference worker when Huawei Cloud is unavailable.
+- as the phone-photo mode for taking or selecting PCB photos;
+- as a same-LAN browser inference worker when `phone_browser` is selected as the
+  detection platform.
 
 The phone can either open the complete UI or the minimal `/phone` page. The
 phone page has separate buttons for camera capture and gallery selection.
 
-When `/phone` loads `best.onnx` successfully, it can act as the second-priority
-inference worker for all five modes:
+When `/phone` loads `best.onnx` successfully, it can act as the inference worker
+for simulation, real, and phone-photo detections. The desktop status panel shows
+whether a real worker is connected. A hidden worker is not started
+automatically; a phone or desktop browser must explicitly open the worker page.
 
-- handheld realtime detection
-- simulation grid detection and final mosaic review
-- real slide-table step-and-capture detection
-- continuous video scan detection
-- phone photo whole-board detection
-
-If Huawei Cloud is unavailable and no phone worker is online, the Windows
-computer or Loongson board falls back to local inference automatically. The
-desktop status panel shows both `华为云检测` and `手机推理` so the active path is
-visible during demos.
+If Huawei Cloud is unavailable and no phone worker is online, the website
+reports the selected platform as unavailable. Select `本地电脑/龙芯` to run local
+OpenCV DNN inference.
 
 On the 2K1000LA, use phone detection only after simulation mode is stable.
 Large phone photos can still be much heavier than the simulation single-cell
@@ -321,20 +334,40 @@ algorithm/outputs/mobile_uploads/<upload_id>/
   metadata.json
 ```
 
-## Slide Scan Settings
+## Real-Mode Fixed 16-Point Scan
 
-Common scan and video-scan variables:
+Real mode does not require the user to know the PCB size. The website scans a
+fixed 16-point window using the teammate-provided step spacing:
+
+```text
+X step: 16 mm
+Y step: 24 mm
+Camera frame: 1280 x 800
+```
+
+The first frame is captured before any XY movement. After all 16 images are
+captured, the backend drains the per-cell detection queue, builds the mosaic,
+emits `mosaic_result`, and only then returns the slide to the origin. This lets
+the UI enter the stitching/result stage without waiting for the origin-return
+move.
+
+The real-mode UI exposes two motion parameters:
+
+- `滑台速度 mm/s`: sent as `motion_speed_mm_s`.
+- `停稳时间 s`: sent as `settle_seconds`.
+
+Common scan variables:
 
 ```powershell
 $env:LOONGSON_AOI_DEBOUNCE_SECONDS = "0.05"
-$env:LOONGSON_AOI_VIDEO_SPEED_MM_S = "2.0"
-$env:LOONGSON_AOI_VIDEO_INFERENCE_FPS = "5"
-$env:LOONGSON_AOI_VIDEO_PREVIEW_FPS = "8"
-$env:LOONGSON_AOI_VIDEO_OVERLAP = "0.2"
+$env:LOONGSON_AOI_MOTOR_DRY_RUN = "0"
+$env:LOONGSON_AOI_HOME_MODE = "soft"
+$env:LOONGSON_AOI_CAMERA_SOURCE = "0"
 ```
 
-Real slide modes require the slide to be placed at the physical origin and
-soft-homed before scanning when no limit switches are installed.
+With no limit switches installed, place the slide at the physical origin and run
+soft home before scanning. On the Loongson board, real GPIO usually requires
+root or a correctly configured gpio group/udev rule.
 
 ## HTTP Interfaces
 
@@ -345,8 +378,6 @@ soft-homed before scanning when no limit switches are installed.
 | `GET /api/system/status`                | Motor, camera, algorithm, and scan readiness           |
 | `GET /api/camera/status`                | Camera open state and latest capture metadata          |
 | `GET /api/camera/stream.mjpg`           | Raw camera preview stream                              |
-| `GET /api/video/status`                 | Live YOLO video session status                         |
-| `GET /api/video/stream.mjpg`            | Annotated YOLO video stream                            |
 | `POST /api/simulation/upload`           | Upload PCB images for simulation mode                  |
 | `GET /phone`                            | Minimal phone upload page                              |
 | `POST /api/phone/upload`                | Upload phone camera/gallery images                     |
@@ -363,13 +394,29 @@ Basic local checks:
 python -m py_compile main.py camera_trigger.py motor_controller.py
 node --check static/app.js
 python -m unittest test_mosaic
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/system/status
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8020/health
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8020/api/system/status
 ```
+
+## GitHub Update Notes
+
+The project uses long-lived feature branches instead of pushing tested work to
+`main` directly:
+
+- `cloud-cooperative-platform`: complete website, mini program, ECS backend, and
+  Loongson deployment scripts.
+- `ui-integration`: synchronized website integration branch.
+- `phone-browser-inference`: synchronized phone/browser inference branch.
+- `hardware-sm`: motor controller and GPIO helper.
+- `algorithm-ai`: training assets, configs, and exported ONNX weights.
+
+`gh` is optional for normal pushes. If a teammate wants to create pull requests
+or inspect GitHub checks from the command line, run `gh auth login` first.
 
 ## Branch Relationship
 
-- `ui-integration`: this web console and integration runtime
+- `cloud-cooperative-platform`: this web console, mini program, and ECS integration runtime
+- `ui-integration`: synchronized copy of the current web console for local integration tests
 - `hardware-sm`: TB6600/XYZ slide-table driver
 - `algorithm-ai`: YOLO training, evaluation, and standalone camera detection
 - `main`: kept untouched unless the team decides to merge tested branches
