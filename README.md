@@ -12,7 +12,8 @@ unless the machine is later changed to two independent Y-axis drivers.
 
 | File | Purpose |
 | --- | --- |
-| `motor_controller.py` | TB6600 step/direction control, soft home, optional limit-switch home, bounded XY/Z movement, continuous scan movement |
+| `motor_controller.py` | TB6600 step/direction control, soft home, optional limit-switch home, bounded XY/Z movement, fixed-point scan movement |
+| `motor_gpio_system_helper.py` | Helper that lets the Python 3.12 web process call the system Python 3.7 libgpiod v1 runtime on the Loongson board |
 | `motor_test.py` | Standalone slide movement plus camera capture smoke test |
 
 ## Public Python API
@@ -63,6 +64,28 @@ python .\motor_controller.py --dry-run z-jog up 1
 
 On the Loongson board, install and enable the GPIO library required by the
 runtime environment, then run without `--dry-run`.
+
+The tested Loongson board currently has two Python GPIO environments:
+
+- system `python3`: libgpiod v1 binding that exposes `Chip.OPEN_BY_NUMBER` and
+  can drive the slide table when run as root;
+- `~/aoi_venv_312/bin/python`: Python 3.12 environment used by the website,
+  where the installed `gpiod` package is v2-style and may fail on this board.
+
+For the website, use the system-python helper path:
+
+```sh
+sudo -E env \
+  AOI_VENV=/home/loongson/aoi_venv_312 \
+  LOONGSON_AOI_MOTOR_DRY_RUN=0 \
+  LOONGSON_AOI_HOME_MODE=soft \
+  LOONGSON_AOI_MOTOR_GPIO_BACKEND=system_python \
+  LOONGSON_AOI_SYSTEM_GPIO_PYTHON=python3 \
+  sh deploy/loongson/run_phone_server.sh
+```
+
+If the board is configured with a `gpio` group and udev rules, root may not be
+required. In the current hardware test setup, root is the reliable path.
 
 ## Soft Home and Limit Switches
 
@@ -154,29 +177,36 @@ $env:LOONGSON_AOI_Y2_STEP_OFFSET = "<gpio-line>"
 $env:LOONGSON_AOI_Y2_DIR_POSITIVE = "1"
 ```
 
-## Continuous Video Scan Support
+## Real Fixed-Point Scan Support
 
-`move_to_xy_stream(...)` is used by the UI branch video-detection mode. It
-moves across long X/Y segments at a requested speed and reports progress so the
-browser can keep the FOV box synchronized with the open-loop slide position.
+`move_to_xy_stream(...)` is used by the web console real mode. Despite the name,
+the current production path is not continuous video scanning. It moves between
+fixed XY capture points at the requested speed, then the camera captures a
+still image.
 
-The function is still bounded by the configured software travel limits. Without
-limit switches or encoders, returning to origin depends on the stepper motors
-not losing steps.
+The real-mode scan uses 16 capture points. The first image is captured before
+any XY movement. After all 16 images are captured, the website starts mosaic
+generation before issuing the return-to-origin movement.
+
+The function is bounded by the configured software travel limits. Without limit
+switches or encoders, returning to origin depends on the stepper motors not
+losing steps.
 
 ## UI Integration Notes
 
-The `ui-integration` branch currently uses this driver in two slide-table
-workflows:
+The `cloud-cooperative-platform` and synchronized `ui-integration` branches use
+this driver in real mode:
 
-- Real stepped scan: move to each XY grid point, settle, capture one frame,
-  run YOLO, then continue the snake path.
-- Continuous video scan: move long X segments at a configured speed while the
-  UI draws the current FOV box and the camera stream runs YOLO inference.
+- capture the origin frame first;
+- move to the next fixed XY point;
+- wait for the configured settle time;
+- capture a frame;
+- enqueue detection and continue the scan;
+- build the 16-image mosaic after all captures;
+- return to origin after the mosaic result is emitted.
 
-The phone-photo and handheld-detection modes in the UI branch do not move the
-slide table and do not require soft home. They are useful for camera/model
-debugging while the hardware is disconnected.
+Simulation and phone-photo modes do not move the slide table and do not require
+soft home.
 
 When testing hardware from the UI branch, keep these assumptions aligned:
 
@@ -193,6 +223,7 @@ branch first, then expose the same environment variables to the UI server.
 ## Branch Relationship
 
 - `hardware-sm`: this TB6600/XYZ slide-table driver
-- `ui-integration`: FastAPI browser UI that imports the motor API
+- `cloud-cooperative-platform`: FastAPI browser UI, cloud/phone/local platform routing, real-mode scan orchestration
+- `ui-integration`: synchronized browser UI branch
 - `algorithm-ai`: YOLO training and detection scripts
 - `main`: kept untouched unless tested branches are merged later
