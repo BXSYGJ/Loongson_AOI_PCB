@@ -345,12 +345,18 @@
         </section>
 
         <section class="bottom-grid">
-          <section class="event-panel">
+          <section class="report-panel" id="reportPanel">
             <div class="section-head compact">
-              <h2>工艺事件流</h2>
-              <span id="eventFlowText">move_xy → debounce → capture_frame → detect_inference → result</span>
+              <h2>诊断报告</h2>
+              <button class="mini-btn" id="generateReportBtn" disabled>生成诊断报告</button>
             </div>
-            <ol id="eventLog"></ol>
+            <div class="report-toolbar">
+              <span id="reportTargetText">请选择已检测单格、整板或手机结果</span>
+              <strong id="reportStatus">等待检测结果</strong>
+              <button class="mini-btn" id="downloadRawFramesBtn" type="button" disabled>导出16张标注图</button>
+              <button class="mini-btn" id="selectMosaicReportBtn" type="button" disabled>选择整板 PCB</button>
+            </div>
+            <article id="diagnosisReport" class="diagnosis-report">检测完成后，可在这里生成中文 LLM 诊断报告。</article>
           </section>
 
           <section class="defect-panel" id="defectPanel">
@@ -361,22 +367,17 @@
             <div id="defectList" class="defect-list"></div>
           </section>
 
-          <section class="report-panel" id="reportPanel">
+          <section class="event-panel">
             <div class="section-head compact">
-              <h2>诊断报告</h2>
-              <button class="mini-btn" id="generateReportBtn" disabled>生成诊断报告</button>
+              <h2>工艺事件流</h2>
+              <span id="eventFlowText">move_xy → debounce → capture_frame → detect_inference → result</span>
             </div>
-            <div class="report-toolbar">
-              <span id="reportTargetText">请选择已检测单格、整板或手机结果</span>
-              <strong id="reportStatus">等待检测结果</strong>
-              <button class="mini-btn" id="selectMosaicReportBtn" type="button" disabled>选择整板 PCB</button>
-            </div>
-            <article id="diagnosisReport" class="diagnosis-report">检测完成后，可在这里生成中文 LLM 诊断报告。</article>
+            <ol id="eventLog"></ol>
           </section>
         </section>
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260707-platform-select"></script>
+    <script src="/static/app.js?v=20260708-fixed16-snake-export"></script>
   </body>
 </html>

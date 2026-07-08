@@ -71,6 +71,8 @@ const state = {
   lastReport: null,
 };
 
+let realSpeedUpdateTimer = null;
+
 function ensureModeCards() {
   const grid = document.querySelector(".mode-grid");
   if (!grid) return;
@@ -193,6 +195,7 @@ const el = {
   defectCount: document.getElementById("defectCount"),
   generateReportBtn: document.getElementById("generateReportBtn"),
   selectMosaicReportBtn: document.getElementById("selectMosaicReportBtn"),
+  downloadRawFramesBtn: document.getElementById("downloadRawFramesBtn"),
   reportTargetText: document.getElementById("reportTargetText"),
   reportStatus: document.getElementById("reportStatus"),
   diagnosisReport: document.getElementById("diagnosisReport"),
@@ -1632,7 +1635,19 @@ function steppedCellRect(metrics, row, col) {
   };
 }
 
-function drawDetectionOverlay(ctx, defects, rect, image, tone = "#c43c3c") {
+function drawCellImage(ctx, image, rect, mirrorX = false) {
+  if (!mirrorX) {
+    ctx.drawImage(image, rect.x, rect.y, rect.w, rect.h);
+    return;
+  }
+  ctx.save();
+  ctx.translate(rect.x + rect.w, rect.y);
+  ctx.scale(-1, 1);
+  ctx.drawImage(image, 0, 0, rect.w, rect.h);
+  ctx.restore();
+}
+
+function drawDetectionOverlay(ctx, defects, rect, image, tone = "#c43c3c", mirrorX = false) {
   if (!defects || !defects.length) return;
   const imageW = image && image.naturalWidth ? image.naturalWidth : 1280;
   const imageH = image && image.naturalHeight ? image.naturalHeight : 800;
@@ -1647,9 +1662,11 @@ function drawDetectionOverlay(ctx, defects, rect, image, tone = "#c43c3c") {
     const x2 = Number(bbox[2]);
     const y2 = Number(bbox[3]);
     if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
-    const bx = rect.x + (x1 / imageW) * rect.w;
+    const displayX1 = mirrorX ? imageW - x2 : x1;
+    const displayX2 = mirrorX ? imageW - x1 : x2;
+    const bx = rect.x + (displayX1 / imageW) * rect.w;
     const by = rect.y + (y1 / imageH) * rect.h;
-    const bw = Math.max(2, ((x2 - x1) / imageW) * rect.w);
+    const bw = Math.max(2, ((displayX2 - displayX1) / imageW) * rect.w);
     const bh = Math.max(2, ((y2 - y1) / imageH) * rect.h);
     const decision = defect.decision || "confirmed";
     const defectTone = decision === "suspected" ? "#b7791f" : tone;
@@ -1706,7 +1723,7 @@ function drawSteppedCanvas(ctx, width, height) {
         const hasDefect = cellDefects && cellDefects.length > 0;
 
         if (image) {
-          ctx.drawImage(image, rect.x, rect.y, rect.w, rect.h);
+          drawCellImage(ctx, image, rect, true);
           ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
           ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
         } else {
@@ -1721,7 +1738,7 @@ function drawSteppedCanvas(ctx, width, height) {
         if (hasDefect) {
           ctx.fillStyle = "rgba(209, 67, 67, 0.12)";
           ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-          drawDetectionOverlay(ctx, cellDefects, rect, image);
+          drawDetectionOverlay(ctx, cellDefects, rect, image, "#c43c3c", true);
         }
       }
     }
@@ -2166,11 +2183,18 @@ function renderReportControls() {
   if (!el.generateReportBtn || !el.reportTargetText || !el.reportStatus) return;
   const hasTarget = Boolean(state.reportTarget);
   const hasMosaic = Boolean(state.mosaic && state.mosaic.scan_id && state.mosaic.mosaic_result_json);
+  const hasAnnotatedFrames = Boolean(state.mosaic && state.mosaic.annotated_frames_zip);
   el.reportTargetText.textContent = reportTargetLabel(state.reportTarget);
   const disabled = state.reportBusy || state.scanning || state.backendRunning || !state.llmReportConfigured || !hasTarget;
   el.generateReportBtn.disabled = disabled;
   if (el.selectMosaicReportBtn) {
     el.selectMosaicReportBtn.disabled = !hasMosaic || state.scanning || state.backendRunning;
+  }
+  if (el.downloadRawFramesBtn) {
+    el.downloadRawFramesBtn.disabled = !hasAnnotatedFrames || state.scanning || state.backendRunning;
+    el.downloadRawFramesBtn.textContent = hasAnnotatedFrames
+      ? `导出${state.mosaic.annotated_frame_count || 16}张标注图`
+      : "导出16张标注图";
   }
   el.generateReportBtn.textContent = state.reportBusy ? "生成中..." : "生成诊断报告";
   if (state.reportBusy) {
@@ -2182,6 +2206,33 @@ function renderReportControls() {
   } else {
     el.reportStatus.textContent = state.reportMessage || "可生成";
   }
+}
+
+function downloadRawFramesArchive() {
+  if (!state.mosaic || !state.mosaic.annotated_frames_zip) {
+    setCommandHint("16 张标注照片尚未生成；请等待真实模式扫描与检测完成", "warn");
+    return;
+  }
+  window.open(artifactUrl(state.mosaic.annotated_frames_zip), "_blank", "noopener");
+  logEvent(`download annotated frames · ${state.mosaic.annotated_frames_zip}`);
+}
+
+function sendRealScanSpeedUpdate() {
+  if (!el.realMotionSpeed || state.mode !== "real" || !(state.scanning || state.backendRunning)) return;
+  const speed = Number(el.realMotionSpeed.value || 3);
+  if (!Number.isFinite(speed) || speed <= 0) {
+    setCommandHint("滑台速度必须是正数", "warn");
+    return;
+  }
+  const sent = send("update_real_scan_speed", { motion_speed_mm_s: speed });
+  if (sent) {
+    setCommandHint(`速度 ${speed}mm/s 已下发，将在下一段移动生效`, "neutral");
+  }
+}
+
+function scheduleRealScanSpeedUpdate() {
+  if (realSpeedUpdateTimer) window.clearTimeout(realSpeedUpdateTimer);
+  realSpeedUpdateTimer = window.setTimeout(sendRealScanSpeedUpdate, 250);
 }
 
 async function generateDiagnosisReport() {
@@ -2283,6 +2334,13 @@ function handlePacket(packet) {
     case "ack":
       logEvent(payload.message || "ack");
       break;
+    case "real_scan_speed_updated":
+      if (payload.motion_speed_mm_s) {
+        el.debounceValue.textContent = `${payload.motion_speed_mm_s}mm/s`;
+      }
+      setCommandHint(`滑台速度已更新为 ${payload.motion_speed_mm_s}mm/s，下一段移动生效`, "neutral");
+      logEvent(`real_scan_speed_updated ${payload.motion_speed_mm_s}mm/s`);
+      break;
     case "grid_plan":
       state.plan = payload;
       state.mosaic = null;
@@ -2354,6 +2412,7 @@ function handlePacket(packet) {
       if (payload.scan_id && payload.mosaic_result_json) {
         setReportTarget({ target_type: "mosaic", scan_id: payload.scan_id }, `整板拼接结果 · 缺陷 ${(payload.defects || []).length} 项`);
       }
+      renderReportControls();
       logEvent(`mosaic_result cells=${payload.cell_count || 0} defects=${(payload.defects || []).length} crop=${payload.board_crop_status || "-"} stitch=${payload.stitch_ms ? Math.round(payload.stitch_ms) : "-"}ms`);
       break;
     case "mosaic_error":
@@ -2848,6 +2907,11 @@ for (const input of [el.videoSpeed, el.videoInferenceFps, el.videoOverlap]) {
   });
 }
 
+if (el.realMotionSpeed) {
+  el.realMotionSpeed.addEventListener("change", sendRealScanSpeedUpdate);
+  el.realMotionSpeed.addEventListener("input", scheduleRealScanSpeedUpdate);
+}
+
 Array.prototype.forEach.call(el.modeCards, (card) => {
   card.addEventListener("click", () => chooseMode(card.dataset.mode));
 });
@@ -2906,6 +2970,9 @@ if (el.refreshPhoneUploadsBtn) {
 }
 if (el.deletePhoneUploadBtn) {
   el.deletePhoneUploadBtn.addEventListener("click", deleteSelectedPhoneUpload);
+}
+if (el.downloadRawFramesBtn) {
+  el.downloadRawFramesBtn.addEventListener("click", downloadRawFramesArchive);
 }
 if (el.phoneUploadSelect) {
   el.phoneUploadSelect.addEventListener("change", () => {

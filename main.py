@@ -91,28 +91,24 @@ EDGE_SAFE_MODE = _env_bool("LOONGSON_AOI_EDGE_SAFE_MODE", _is_loongson_host())
 STATUS_CAMERA_PROBE = _env_bool("LOONGSON_AOI_STATUS_CAMERA_PROBE", not EDGE_SAFE_MODE)
 PHONE_WORKER_ALLOW_DESKTOP = _env_bool("LOONGSON_AOI_ALLOW_DESKTOP_PHONE_WORKER", False)
 REAL_SCAN_PRESET = os.getenv("LOONGSON_AOI_REAL_SCAN_PRESET", "fixed16").strip().lower()
-FIXED_SCAN_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 16.0)
-FIXED_SCAN_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 24.0)
+FIXED_SCAN_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 30.0)
+FIXED_SCAN_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 18.0)
 FIXED_SCAN_IMAGE_WIDTH = _env_int("LOONGSON_AOI_CAMERA_WIDTH", 1280)
 FIXED_SCAN_IMAGE_HEIGHT = _env_int("LOONGSON_AOI_CAMERA_HEIGHT", 800)
+FIXED_SCAN_FOV_LONG_MM = _env_float("LOONGSON_AOI_CAMERA_FOV_LONG_MM", 39.0)
+FIXED_SCAN_FOV_SHORT_MM = _env_float(
+    "LOONGSON_AOI_CAMERA_FOV_SHORT_MM",
+    FIXED_SCAN_FOV_LONG_MM * FIXED_SCAN_IMAGE_HEIGHT / max(FIXED_SCAN_IMAGE_WIDTH, 1),
+)
+FIXED_SCAN_AXIS_MAPPING = os.getenv(
+    "LOONGSON_AOI_STITCH_AXIS_MAPPING",
+    "slide_x_image_x_slide_y_image_y",
+).strip().lower()
 FIXED_SCAN_SETTLE_SECONDS = _env_float("LOONGSON_AOI_FIXED_SCAN_SETTLE_SECONDS", 1.0)
-FIXED_SCAN_POINTS_DEFAULT = (
-    (0.0, 0.0),
-    (0.0, 24.0),
-    (0.0, 48.0),
-    (0.0, 72.0),
-    (16.0, 0.0),
-    (16.0, 24.0),
-    (16.0, 48.0),
-    (16.0, 72.0),
-    (32.0, 0.0),
-    (32.0, 24.0),
-    (32.0, 48.0),
-    (32.0, 72.0),
-    (48.0, 0.0),
-    (48.0, 24.0),
-    (48.0, 48.0),
-    (48.0, 72.0),
+FIXED_SCAN_POINTS_DEFAULT = tuple(
+    (float(col * FIXED_SCAN_STEP_X_MM), float(row * FIXED_SCAN_STEP_Y_MM))
+    for row in range(4)
+    for col in range(4)
 )
 
 
@@ -129,6 +125,23 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 scan_lock = asyncio.Lock()
 active_stop_event: asyncio.Event | None = None
 active_scan_task: asyncio.Task | None = None
+
+
+class RealScanRuntimeControl:
+    def __init__(self, motion_speed_mm_s: float) -> None:
+        self.motion_speed_mm_s = normalize_motion_speed(motion_speed_mm_s)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    def update_speed(self, motion_speed_mm_s: Any) -> float:
+        self.motion_speed_mm_s = normalize_motion_speed(motion_speed_mm_s)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        return self.motion_speed_mm_s
+
+    def current_speed(self) -> float:
+        return float(self.motion_speed_mm_s)
+
+
+active_real_scan_control: RealScanRuntimeControl | None = None
 
 
 class PhoneInferenceUnavailable(RuntimeError):
@@ -728,24 +741,36 @@ def build_fixed_16_scan_plan(origin_x_mm: float = 0.0, origin_y_mm: float = 0.0)
 
     x_to_col = {value: index for index, value in enumerate(x_values)}
     y_to_row = {value: index for index, value in enumerate(y_values)}
+    point_set = {(round(float(x), 4), round(float(y), 4)) for x, y in points}
     scan_points: list[dict[str, Any]] = []
-    for order, (x_raw, y_raw) in enumerate(points):
-        x = round(float(x_raw), 4)
-        y = round(float(y_raw), 4)
-        scan_points.append(
-            {
-                "order": order,
-                "row": y_to_row[round(y, 4)],
-                "col": x_to_col[round(x, 4)],
-                "x_mm": round(origin_x_mm + x, 4),
-                "y_mm": round(origin_y_mm + y, 4),
-            }
-        )
+    for row_index, y in enumerate(y_values):
+        x_order = x_values if row_index % 2 == 0 else list(reversed(x_values))
+        for x in x_order:
+            if (round(x, 4), round(y, 4)) not in point_set:
+                raise ValueError("Fixed scan points must form a complete rectangular grid.")
+            order = len(scan_points)
+            x = round(float(x), 4)
+            y = round(float(y), 4)
+            scan_points.append(
+                {
+                    "order": order,
+                    "row": y_to_row[round(y, 4)],
+                    "col": x_to_col[round(x, 4)],
+                    "x_mm": round(origin_x_mm + x, 4),
+                    "y_mm": round(origin_y_mm + y, 4),
+                }
+            )
 
     rows = len(y_values)
     cols = len(x_values)
     covered_length = cols * FIXED_SCAN_STEP_X_MM
     covered_width = rows * FIXED_SCAN_STEP_Y_MM
+    if FIXED_SCAN_AXIS_MAPPING == "slide_y_image_x_slide_x_image_y":
+        fov_width_mm = FIXED_SCAN_FOV_SHORT_MM
+        fov_height_mm = FIXED_SCAN_FOV_LONG_MM
+    else:
+        fov_width_mm = FIXED_SCAN_FOV_LONG_MM
+        fov_height_mm = FIXED_SCAN_FOV_SHORT_MM
     return {
         "scan_type": "fixed_points_16",
         "pcb_size_known": False,
@@ -753,13 +778,21 @@ def build_fixed_16_scan_plan(origin_x_mm: float = 0.0, origin_y_mm: float = 0.0)
         "cols": cols,
         "total_cells": len(scan_points),
         "scan_points": scan_points,
-        "point_order": "x_major_teammate_fixed_points",
-        "fov_mm": {"width": FIXED_SCAN_STEP_X_MM, "height": FIXED_SCAN_STEP_Y_MM},
+        "point_order": "y_major_horizontal_snake_fixed_points",
+        "fov_mm": {
+            "long": round(FIXED_SCAN_FOV_LONG_MM, 4),
+            "short": round(FIXED_SCAN_FOV_SHORT_MM, 4),
+            "width": round(fov_width_mm, 4),
+            "height": round(fov_height_mm, 4),
+            "image_width": round(FIXED_SCAN_FOV_LONG_MM, 4),
+            "image_height": round(FIXED_SCAN_FOV_SHORT_MM, 4),
+        },
         "step_mm": {"x": FIXED_SCAN_STEP_X_MM, "y": FIXED_SCAN_STEP_Y_MM},
         "image_px": {"width": FIXED_SCAN_IMAGE_WIDTH, "height": FIXED_SCAN_IMAGE_HEIGHT},
+        "axis_mapping": FIXED_SCAN_AXIS_MAPPING,
         "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
         "covered_mm": {"length": round(covered_length, 4), "width": round(covered_width, 4)},
-        "mosaic_mode": "auto_crop_overlap",
+        "mosaic_mode": "physical_fov_crop_stitch",
         "settle_seconds": normalize_settle_seconds(FIXED_SCAN_SETTLE_SECONDS),
         "motion_speed_mm_s": normalize_motion_speed(),
         "z_policy": "fixed_during_scan",
@@ -988,7 +1021,11 @@ async def run_real_scan_capture_queue(
     cells = iter_snake_cells(plan)
     total = len(cells)
     settle_seconds = float(plan.get("settle_seconds", DEBOUNCE_SECONDS) or DEBOUNCE_SECONDS)
-    motion_speed_mm_s = normalize_motion_speed(plan.get("motion_speed_mm_s"))
+    control = active_real_scan_control or RealScanRuntimeControl(plan.get("motion_speed_mm_s"))
+    motion_speed_mm_s = control.current_speed()
+
+    def current_motion_speed() -> float:
+        return (active_real_scan_control or control).current_speed()
 
     plan_payload = dict(plan)
     plan_payload["operation_mode"] = "real"
@@ -1231,9 +1268,14 @@ async def run_real_scan_capture_queue(
         y_mm = float(cell["y_mm"])
         first_cell_capture = index == 1
 
-        update_manifest_cell(row, col, {"x_mm": x_mm, "y_mm": y_mm, "status": "capturing" if first_cell_capture else "moving"})
+        update_manifest_cell(
+            row,
+            col,
+            {"order": index, "x_mm": x_mm, "y_mm": y_mm, "status": "capturing" if first_cell_capture else "moving"},
+        )
 
         if first_cell_capture:
+            move_speed = current_motion_speed()
             await emit(
                 "scan_phase",
                 {
@@ -1245,10 +1287,11 @@ async def run_real_scan_capture_queue(
                     "operation_mode": "real",
                     "motion": "none",
                     "message": "首点先拍照，随后再进入滑台移动流程。",
-                    "motion_speed_mm_s": motion_speed_mm_s,
+                    "motion_speed_mm_s": move_speed,
                 },
             )
         else:
+            move_speed = current_motion_speed()
             await emit(
                 "scan_phase",
                 {
@@ -1259,11 +1302,11 @@ async def run_real_scan_capture_queue(
                     "y_mm": y_mm,
                     "operation_mode": "real",
                     "motion": "physical",
-                    "motion_speed_mm_s": motion_speed_mm_s,
+                    "motion_speed_mm_s": move_speed,
                 },
             )
             try:
-                await asyncio.to_thread(motor_controller.move_to_xy_stream, x_mm, y_mm, motion_speed_mm_s)
+                await asyncio.to_thread(motor_controller.move_to_xy_stream, x_mm, y_mm, move_speed)
             except Exception as exc:
                 await emit(
                     "scan_error",
@@ -1361,6 +1404,46 @@ async def run_real_scan_capture_queue(
     origin = plan["origin_mm"]
     origin_x_mm = float(origin["x"])
     origin_y_mm = float(origin["y"])
+    full_capture_completed = not capture_failure and not stopped_early and int(queue_stats["captured"]) >= total
+    returned_to_origin = False
+    return_origin_error: Exception | None = None
+
+    if full_capture_completed:
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            "real",
+            list(manifest_cells.values()),
+            status="captured_returning",
+            extra={"detection_queue": queue_payload()},
+        )
+        await emit(
+            "scan_phase",
+            {
+                "phase": "return_origin",
+                "x_mm": origin_x_mm,
+                "y_mm": origin_y_mm,
+                "operation_mode": "real",
+                "detection_platform": detection_platform,
+                "motion": "physical",
+                "motion_speed_mm_s": current_motion_speed(),
+                "queue": queue_payload(),
+                "message": "All frames captured. Returning to origin before final detection and mosaic.",
+            },
+        )
+        try:
+            await asyncio.to_thread(motor_controller.move_to_xy_stream, origin_x_mm, origin_y_mm, current_motion_speed())
+            returned_to_origin = True
+            camera_trigger.write_scan_manifest(
+                scan_id,
+                plan_payload,
+                "real",
+                list(manifest_cells.values()),
+                status="captured_returned",
+                extra={"detection_queue": queue_payload(), "returned_to_origin": True},
+            )
+        except Exception as exc:
+            return_origin_error = exc
 
     await emit(
         "scan_phase",
@@ -1394,6 +1477,27 @@ async def run_real_scan_capture_queue(
             "scan_stopped",
             {
                 "message": "Scan stopped before all 16 capture points were completed.",
+                "progress": {"done": int(queue_stats["captured"]), "total": total},
+                "queue": queue_payload(),
+            },
+        )
+        return
+
+    if return_origin_error is not None:
+        camera_trigger.write_scan_manifest(
+            scan_id,
+            plan_payload,
+            "real",
+            list(manifest_cells.values()),
+            status="return_origin_failed",
+            extra={"return_origin_error": str(return_origin_error), "detection_queue": queue_payload()},
+        )
+        await emit(
+            "scan_error",
+            {
+                "message": f"Return to scan origin failed: {return_origin_error}",
+                "x_mm": origin_x_mm,
+                "y_mm": origin_y_mm,
                 "progress": {"done": int(queue_stats["captured"]), "total": total},
                 "queue": queue_payload(),
             },
@@ -1481,39 +1585,11 @@ async def run_real_scan_capture_queue(
         )
 
     await emit(
-        "scan_phase",
-        {
-            "phase": "return_origin",
-            "x_mm": origin_x_mm,
-            "y_mm": origin_y_mm,
-            "operation_mode": "real",
-            "detection_platform": detection_platform,
-            "motion": "physical",
-            "motion_speed_mm_s": motion_speed_mm_s,
-            "queue": queue_payload(),
-        },
-    )
-    try:
-        await asyncio.to_thread(motor_controller.move_to_xy_stream, origin_x_mm, origin_y_mm, motion_speed_mm_s)
-    except Exception as exc:
-        await emit(
-            "scan_error",
-            {
-                "message": f"Return to scan origin failed: {exc}",
-                "x_mm": origin_x_mm,
-                "y_mm": origin_y_mm,
-                "progress": {"done": int(queue_stats["captured"]), "total": total},
-                "mosaic": mosaic_payload,
-            },
-        )
-        return
-
-    await emit(
         "scan_complete",
         {
             "message": "Scan complete. Origin restored.",
             "progress": {"done": int(queue_stats["completed"]), "total": total},
-            "returned_to_origin": True,
+            "returned_to_origin": returned_to_origin,
             "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
             "operation_mode": "real",
             "detection_platform": detection_platform,
@@ -1536,7 +1612,12 @@ async def run_scan(
     stop_event: asyncio.Event,
 ) -> None:
     if operation_mode == "real" and capture_mode != "mock":
-        await run_real_scan_capture_queue(websocket, scan_id, plan, detection_platform, stop_event)
+        global active_real_scan_control
+        active_real_scan_control = RealScanRuntimeControl(plan.get("motion_speed_mm_s"))
+        try:
+            await run_real_scan_capture_queue(websocket, scan_id, plan, detection_platform, stop_event)
+        finally:
+            active_real_scan_control = None
         return
 
     cells = iter_snake_cells(plan)
@@ -1587,7 +1668,7 @@ async def run_scan(
         col = int(cell["col"])
         x_mm = float(cell["x_mm"])
         y_mm = float(cell["y_mm"])
-        update_manifest_cell(row, col, {"x_mm": x_mm, "y_mm": y_mm, "status": "moving"})
+        update_manifest_cell(row, col, {"order": index, "x_mm": x_mm, "y_mm": y_mm, "status": "moving"})
 
         await send_packet(
             websocket,
@@ -2570,7 +2651,7 @@ async def fixed16_grid_preview(
 
 @app.websocket("/ws/control")
 async def websocket_control(websocket: WebSocket) -> None:
-    global active_stop_event, active_scan_task
+    global active_stop_event, active_scan_task, active_real_scan_control
 
     await websocket.accept()
     await send_packet(websocket, "ack", {"message": "WebSocket connected."})
@@ -2605,6 +2686,31 @@ async def websocket_control(websocket: WebSocket) -> None:
                     continue
                 motor_controller.move_z_step(direction, dist)
                 await send_packet(websocket, "ack", {"request_id": request_id, "message": "z_jog accepted."})
+                continue
+
+            if packet_type == "update_real_scan_speed":
+                if active_real_scan_control is None or not (active_scan_task and not active_scan_task.done()):
+                    await send_packet(
+                        websocket,
+                        "scan_error",
+                        {"request_id": request_id, "message": "No real scan is running; speed update ignored."},
+                    )
+                    continue
+                try:
+                    speed = active_real_scan_control.update_speed(payload.get("motion_speed_mm_s"))
+                except (TypeError, ValueError) as exc:
+                    await send_packet(websocket, "scan_error", {"request_id": request_id, "message": str(exc)})
+                    continue
+                await send_packet(
+                    websocket,
+                    "real_scan_speed_updated",
+                    {
+                        "request_id": request_id,
+                        "motion_speed_mm_s": speed,
+                        "applies": "next_motion_segment",
+                        "updated_at": active_real_scan_control.updated_at,
+                    },
+                )
                 continue
 
             if packet_type == "stop_scan":

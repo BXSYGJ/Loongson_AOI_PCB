@@ -25,17 +25,17 @@ DEFAULT_CLASS_NAMES = {
 }
 
 DEFAULT_CN_NAMES = {
-    "missing_hole": "漏孔",
-    "mouse_bite": "鼠咬",
-    "open_circuit": "断路",
-    "short_circuit": "短路",
-    "spur": "毛刺",
-    "spurious_copper": "杂铜",
-    "missing_component": "缺件",
-    "improper_installation": "安装不良",
-    "excess_solder": "多锡",
-    "dry_solder_joint": "虚焊",
-    "reverse_component": "反向",
+    "missing_hole": "missing_hole",
+    "mouse_bite": "mouse_bite",
+    "open_circuit": "open_circuit",
+    "short_circuit": "short_circuit",
+    "spur": "spur",
+    "spurious_copper": "spurious_copper",
+    "missing_component": "missing_component",
+    "improper_installation": "improper_installation",
+    "excess_solder": "excess_solder",
+    "dry_solder_joint": "dry_solder_joint",
+    "reverse_component": "reverse_component",
 }
 
 
@@ -82,7 +82,7 @@ class LocalDnnDetector:
         self.model_path = Path(os.getenv("LOONGSON_AOI_LOCAL_DNN_MODEL", str(camera_trigger.DEFAULT_WEIGHTS))).expanduser()
         self.config_path = Path(os.getenv("LOONGSON_AOI_LOCAL_DNN_CONFIG", str(camera_trigger.DEFAULT_CONFIG))).expanduser()
         self.imgsz = _env_int("LOONGSON_AOI_LOCAL_DNN_IMGSZ", 1024)
-        self.conf = _env_float("LOONGSON_AOI_LOCAL_DNN_CONF", _env_float("LOONGSON_AOI_YOLO_CONF", 0.5))
+        self.conf = _env_float("LOONGSON_AOI_LOCAL_DNN_CONF", _env_float("LOONGSON_AOI_YOLO_CONF", 0.3))
         self.iou = _env_float("LOONGSON_AOI_LOCAL_DNN_IOU", 0.45)
         self.opencv_threads = _env_int("LOONGSON_AOI_LOCAL_DNN_OPENCV_THREADS", 1 if self.edge_safe_mode else 0)
         self.max_source_dim = _env_int("LOONGSON_AOI_LOCAL_DNN_MAX_SOURCE_DIM", 1280 if self.edge_safe_mode else 0)
@@ -163,7 +163,7 @@ class LocalDnnDetector:
         for raw_detection in raw_detections:
             class_id = int(raw_detection["class_id"])
             defect_type = self._class_names.get(class_id, f"class_{class_id}")
-            label = self._cn_names.get(defect_type, defect_type)
+            label = defect_type
             bbox = raw_detection["bbox"]
             confidence = float(raw_detection["confidence"])
             detections.append(
@@ -338,17 +338,7 @@ class LocalDnnDetector:
 
     @staticmethod
     def _draw_detection(image: Any, bbox: list[int], label: str, confidence: float, cv2: Any) -> None:
-        x1, y1, x2, y2 = [int(value) for value in bbox]
-        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 180, 0), 2)
-        cv2.putText(
-            image,
-            f"{label} {confidence:.2f}",
-            (x1, max(y1 - 8, 16)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 180, 0),
-            2,
-        )
+        camera_trigger.draw_detection(image, bbox, label, confidence, ascii_label=label)
 
 
 local_dnn_detector = LocalDnnDetector()

@@ -7,6 +7,7 @@ import shutil
 import sys
 import threading
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -50,6 +51,46 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None or value.strip() == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+ASCII_LABEL_ALIASES = {
+    "short": "short_circuit",
+    "short_circuit": "short_circuit",
+    "dry_solder_joint": "dry_solder_joint",
+    "improper_installation": "improper_installation",
+    "pcb_damage": "pcb_damage",
+    "insufficient_solder": "insufficient_solder",
+    "reverse_component": "reverse_component",
+    "excess_solder": "excess_solder",
+    "missing_hole": "missing_hole",
+    "mouse_bite": "mouse_bite",
+    "open_circuit": "open_circuit",
+    "spur": "spur",
+    "spurious_copper": "spurious_copper",
+    "missing_component": "missing_component",
+}
+
+
+def _is_ascii_text(text: str) -> bool:
+    return all(32 <= ord(char) <= 126 for char in text)
+
+
+def _normalize_label_text(label: Any, ascii_label: str | None = None) -> str:
+    text = str(label or ascii_label or "defect").strip() or "defect"
+    for prefix in ("suspected ", "conflict "):
+        if text.startswith(prefix):
+            return f"{prefix}{_normalize_label_text(text[len(prefix):], ascii_label)}"
+    ascii_candidate = str(ascii_label or "").strip()
+    if ascii_candidate and _is_ascii_text(ascii_candidate):
+        return ascii_candidate
+    if _is_ascii_text(text):
+        return ASCII_LABEL_ALIASES.get(text, text)
+    cleaned = re.sub(r"[^\x20-\x7E]+", "", text).strip()
+    return cleaned or "defect"
+
+
+def _format_annotation_text(label: Any, confidence: float, ascii_label: str | None = None) -> str:
+    return f"{_normalize_label_text(label, ascii_label)} {confidence:.2f}"
 
 
 def _is_algorithm_root(path: Path) -> bool:
@@ -150,8 +191,8 @@ PHONE_PRECISION_TILE_SIZES = _env_int_list("LOONGSON_AOI_PHONE_PRECISION_TILE_SI
 PHONE_PRECISION_IMGSZS = _env_int_list("LOONGSON_AOI_PHONE_PRECISION_IMGSZS", PHONE_IMGSZS)
 PHONE_PRECISION_TILE_OVERLAP = _env_float("LOONGSON_AOI_PHONE_PRECISION_TILE_OVERLAP", PHONE_TILE_OVERLAP)
 PHONE_FUSION_IOU = _env_float("LOONGSON_AOI_PHONE_FUSION_IOU", 0.45)
-PHONE_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_CONFIRM_CONF", 0.5)
-PHONE_MULTI_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF", 0.35)
+PHONE_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_CONFIRM_CONF", 0.3)
+PHONE_MULTI_CONFIRM_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF", 0.3)
 PHONE_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_SUSPECTED_CONF", 0.2)
 PHONE_MULTI_SUSPECTED_CONF = _env_float("LOONGSON_AOI_PHONE_MULTI_SUSPECTED_CONF", 0.1)
 MOSAIC_FUSION_IOU = _env_float("LOONGSON_AOI_MOSAIC_FUSION_IOU", 0.45)
@@ -165,8 +206,15 @@ ONNX_INPUT_IMGSZ = _env_int("LOONGSON_AOI_ONNX_INPUT_IMGSZ", 0)
 OPENCV_THREADS = _env_int("LOONGSON_AOI_OPENCV_THREADS", 0)
 FIXED_STEP_X_PX = _env_int("LOONGSON_AOI_FIXED_STEP_X_PX", 0)
 FIXED_STEP_Y_PX = _env_int("LOONGSON_AOI_FIXED_STEP_Y_PX", 0)
-FIXED_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 16.0)
-FIXED_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 24.0)
+FIXED_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 30.0)
+FIXED_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 18.0)
+CAMERA_FOV_LONG_MM = _env_float("LOONGSON_AOI_CAMERA_FOV_LONG_MM", 39.0)
+CAMERA_FOV_SHORT_MM = _env_float("LOONGSON_AOI_CAMERA_FOV_SHORT_MM", 0.0)
+STITCH_AXIS_MAPPING = os.getenv(
+    "LOONGSON_AOI_STITCH_AXIS_MAPPING",
+    "slide_x_image_x_slide_y_image_y",
+).strip().lower()
+STITCH_MIRROR_X = _env_bool("LOONGSON_AOI_STITCH_MIRROR_X", True)
 
 
 def _now_iso() -> str:
@@ -487,7 +535,7 @@ class YoloDetector:
     def __init__(self) -> None:
         self.weights = DEFAULT_WEIGHTS
         self.config = DEFAULT_CONFIG
-        self.conf = _env_float("LOONGSON_AOI_YOLO_CONF", 0.5)
+        self.conf = _env_float("LOONGSON_AOI_YOLO_CONF", 0.3)
         self.imgsz = _env_int("LOONGSON_AOI_YOLO_IMGSZ", 640)
         self.backend_preference = DETECTOR_BACKEND
         self._lock = threading.RLock()
@@ -758,7 +806,7 @@ class YoloDetector:
             raw_detections.append(
                 {
                     "type": defect_type,
-                    "label": self._cn_names.get(defect_type, defect_type),
+                    "label": defect_type,
                     "bbox": [x1, y1, x2, y2],
                     "confidence": round(confidence, 4),
                 }
@@ -785,7 +833,7 @@ class YoloDetector:
             detections.append(
                 {
                     "type": defect_type,
-                    "label": self._cn_names.get(defect_type, defect_type),
+                    "label": defect_type,
                     "bbox": bbox,
                     "confidence": round(confidence, 4),
                 }
@@ -821,6 +869,7 @@ class YoloDetector:
                     detection["bbox"],
                     str(detection.get("label") or detection.get("type")),
                     float(detection.get("confidence", 0.0)),
+                    ascii_label=str(detection.get("type") or ""),
                 )
 
         annotated_path.parent.mkdir(parents=True, exist_ok=True)
@@ -859,6 +908,7 @@ class YoloDetector:
                     detection["bbox"],
                     str(detection.get("label") or detection.get("type")),
                     float(detection.get("confidence", 0.0)),
+                    ascii_label=str(detection.get("type") or ""),
                 )
 
         if annotated_path is not None:
@@ -875,10 +925,11 @@ def draw_detection(
     label: str,
     confidence: float,
     color: tuple[int, int, int] = (0, 180, 0),
+    ascii_label: str | None = None,
 ) -> None:
     cv2 = _import_cv2()
     x1, y1, x2, y2 = bbox
-    text = f"{label} {confidence:.2f}"
+    text = _format_annotation_text(label, confidence, ascii_label)
     cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
     cv2.putText(image, text, (x1, max(y1 - 8, 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
@@ -1246,6 +1297,15 @@ def _round_bbox(bbox: list[float]) -> list[int]:
     return [int(round(value)) for value in bbox]
 
 
+def _mirror_bbox_x(bbox: list[float], image_width: float) -> list[float]:
+    return [
+        max(0.0, image_width - float(bbox[2])),
+        float(bbox[1]),
+        min(image_width, image_width - float(bbox[0])),
+        float(bbox[3]),
+    ]
+
+
 def _cell_key(row: Any, col: Any) -> str:
     return f"{row}:{col}"
 
@@ -1284,6 +1344,9 @@ def _fuse_cell_detections_for_mosaic(
         source_rect = [src_x, src_y, src_x + src_w, src_y + src_h]
         dst_x = float(placement.get("x_px", 0))
         dst_y = float(placement.get("y_px", 0))
+        full_tile = placement.get("full_tile_px") or {}
+        tile_width = float(full_tile.get("width") or placement.get("width_px") or src_w)
+        mirror_x = bool(placement.get("mirror_x"))
 
         for index, defect in enumerate(cell.get("defects") or []):
             if not isinstance(defect, dict):
@@ -1293,7 +1356,8 @@ def _fuse_cell_detections_for_mosaic(
                 discarded.append({"row": row, "col": col, "index": index, "reason": "invalid_bbox", "defect": defect})
                 continue
             bbox_area = _bbox_area(bbox)
-            source_bbox = _clip_bbox(bbox, source_rect)
+            mapped_bbox = _mirror_bbox_x(bbox, tile_width) if mirror_x else bbox
+            source_bbox = _clip_bbox(mapped_bbox, source_rect)
             if source_bbox is None:
                 discarded.append({"row": row, "col": col, "index": index, "reason": "outside_retained_source_crop", "defect": defect})
                 continue
@@ -1343,6 +1407,8 @@ def _fuse_cell_detections_for_mosaic(
             candidate["bbox"] = _round_bbox(output_bbox)
             candidate["mosaic_bbox"] = _round_bbox(mosaic_bbox)
             candidate["original_bbox"] = _round_bbox(bbox)
+            candidate["mosaic_source_bbox"] = _round_bbox(mapped_bbox)
+            candidate["source_mirror_x"] = mirror_x
             candidate["source"] = "cell_mosaic_candidate"
             candidate["coordinate_space"] = coordinate_space
             candidate["source_cell"] = {
@@ -1431,6 +1497,9 @@ def _fuse_cell_detections_for_mosaic(
             "label": best.get("label") or best.get("type"),
             "bbox": best.get("bbox"),
             "mosaic_bbox": best.get("mosaic_bbox"),
+            "original_bbox": best.get("original_bbox"),
+            "mosaic_source_bbox": best.get("mosaic_source_bbox"),
+            "source_mirror_x": best.get("source_mirror_x"),
             "confidence": round(evidence_score, 4),
             "max_confidence": round(max_confidence, 4),
             "mean_confidence": round(mean_confidence, 4),
@@ -1448,6 +1517,9 @@ def _fuse_cell_detections_for_mosaic(
                     "confidence": item.get("confidence"),
                     "bbox": item.get("bbox"),
                     "mosaic_bbox": item.get("mosaic_bbox"),
+                    "original_bbox": item.get("original_bbox"),
+                    "mosaic_source_bbox": item.get("mosaic_source_bbox"),
+                    "source_mirror_x": item.get("source_mirror_x"),
                     "source_cell": item.get("source_cell"),
                     "retained_ratio": item.get("retained_ratio"),
                 }
@@ -1691,6 +1763,182 @@ def _estimate_pair_step_px(first_image: Any, second_image: Any, axis: str) -> tu
     return max(1, int(round(best_step / max(scale, 1e-6)))), best_score
 
 
+def _round_vector_px(dx: float, dy: float) -> dict[str, int]:
+    rounded_dx = int(round(dx))
+    rounded_dy = int(round(dy))
+    return {"dx": 0 if abs(rounded_dx) <= 1 else rounded_dx, "dy": 0 if abs(rounded_dy) <= 1 else rounded_dy}
+
+
+def _normalize_vector_direction(vector: dict[str, int]) -> dict[str, int]:
+    dx = int(vector.get("dx", 0))
+    dy = int(vector.get("dy", 0))
+    if abs(dx) >= abs(dy):
+        return {"dx": abs(dx), "dy": dy if dx >= 0 else -dy}
+    return {"dx": dx if dy >= 0 else -dx, "dy": abs(dy)}
+
+
+def _edge_phase_displacement_px(first_image: Any, second_image: Any) -> dict[str, Any] | None:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    first = cv2.cvtColor(first_image, cv2.COLOR_BGR2GRAY) if first_image.ndim == 3 else first_image
+    second = cv2.cvtColor(second_image, cv2.COLOR_BGR2GRAY) if second_image.ndim == 3 else second_image
+    if first.shape[:2] != second.shape[:2]:
+        second = cv2.resize(second, (first.shape[1], first.shape[0]), interpolation=cv2.INTER_AREA)
+    height, width = first.shape[:2]
+    scale = min(1.0, 640.0 / max(float(width), float(height), 1.0))
+    if scale < 1.0:
+        size = (max(8, int(round(width * scale))), max(8, int(round(height * scale))))
+        first = cv2.resize(first, size, interpolation=cv2.INTER_AREA)
+        second = cv2.resize(second, size, interpolation=cv2.INTER_AREA)
+    first_blur = cv2.GaussianBlur(first, (3, 3), 0)
+    second_blur = cv2.GaussianBlur(second, (3, 3), 0)
+    first_edge = cv2.Laplacian(first_blur, cv2.CV_32F, ksize=3)
+    second_edge = cv2.Laplacian(second_blur, cv2.CV_32F, ksize=3)
+    if float(np.std(first_edge)) <= 1e-6 or float(np.std(second_edge)) <= 1e-6:
+        return None
+    window = cv2.createHanningWindow((first_edge.shape[1], first_edge.shape[0]), cv2.CV_32F)
+    (shift_x, shift_y), response = cv2.phaseCorrelate(first_edge * window, second_edge * window)
+    return {
+        "dx": float(shift_x / max(scale, 1e-6)),
+        "dy": float(shift_y / max(scale, 1e-6)),
+        "score": float(response),
+        "source": "edge_phase",
+    }
+
+
+def _orb_displacement_px(first_image: Any, second_image: Any) -> dict[str, Any] | None:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    first = cv2.cvtColor(first_image, cv2.COLOR_BGR2GRAY) if first_image.ndim == 3 else first_image
+    second = cv2.cvtColor(second_image, cv2.COLOR_BGR2GRAY) if second_image.ndim == 3 else second_image
+    if first.shape[:2] != second.shape[:2]:
+        second = cv2.resize(second, (first.shape[1], first.shape[0]), interpolation=cv2.INTER_AREA)
+    try:
+        orb = cv2.ORB_create(nfeatures=2000)
+    except Exception:
+        return None
+    keypoints_first, descriptors_first = orb.detectAndCompute(first, None)
+    keypoints_second, descriptors_second = orb.detectAndCompute(second, None)
+    if descriptors_first is None or descriptors_second is None or len(keypoints_first) < 8 or len(keypoints_second) < 8:
+        return None
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = sorted(matcher.match(descriptors_first, descriptors_second), key=lambda item: item.distance)[:80]
+    if len(matches) < 8:
+        return None
+    points_first = np.float32([keypoints_first[match.queryIdx].pt for match in matches])
+    points_second = np.float32([keypoints_second[match.trainIdx].pt for match in matches])
+    affine, inliers = cv2.estimateAffinePartial2D(points_first, points_second, method=cv2.RANSAC, ransacReprojThreshold=5)
+    if affine is None or inliers is None:
+        return None
+    inlier_count = int(inliers.sum())
+    if inlier_count < 8:
+        return None
+    inlier_ratio = inlier_count / max(len(matches), 1)
+    score = min(1.0, inlier_ratio * min(1.0, inlier_count / 20.0) * 2.0)
+    return {
+        "dx": float(affine[0, 2]),
+        "dy": float(affine[1, 2]),
+        "score": float(score),
+        "source": "orb_ransac",
+        "matches": len(matches),
+        "inliers": inlier_count,
+    }
+
+
+def _estimate_pair_displacement_px(first_image: Any, second_image: Any) -> dict[str, Any]:
+    candidates = []
+    phase = _edge_phase_displacement_px(first_image, second_image)
+    if phase is not None:
+        candidates.append(phase)
+    orb = _orb_displacement_px(first_image, second_image)
+    if orb is not None:
+        candidates.append(orb)
+    if not candidates:
+        return {"dx": 0.0, "dy": 0.0, "score": 0.0, "source": "unavailable", "candidates": []}
+    candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    phase_candidates = [item for item in candidates if item.get("source") == "edge_phase" and float(item.get("score", 0.0)) >= 0.08]
+    selected = phase_candidates[0] if phase_candidates else candidates[0]
+    result = dict(selected)
+    result["candidates"] = candidates
+    return result
+
+
+def _estimate_axis_vector_px(
+    cells: list[dict[str, Any]],
+    images: dict[str, Any],
+    axis: str,
+) -> tuple[dict[str, int] | None, float, list[dict[str, Any]]]:
+    import numpy as np  # type: ignore[import-not-found]
+
+    manual = FIXED_STEP_X_PX if axis == "x" else FIXED_STEP_Y_PX
+    if manual > 0:
+        vector = {"dx": int(manual), "dy": 0} if axis == "x" else {"dx": 0, "dy": int(manual)}
+        return vector, 1.0, [{"source": "manual_env", "vector_px": vector, "score": 1.0}]
+
+    group_key = "y_mm" if axis == "x" else "x_mm"
+    sort_key = "x_mm" if axis == "x" else "y_mm"
+    groups: dict[float, list[dict[str, Any]]] = {}
+    for cell in cells:
+        groups.setdefault(round(float(cell.get(group_key, 0.0)), 4), []).append(cell)
+
+    vectors: list[tuple[float, float]] = []
+    scores: list[float] = []
+    pair_details: list[dict[str, Any]] = []
+    for group_cells in groups.values():
+        ordered = sorted(group_cells, key=lambda item: float(item.get(sort_key, 0.0)))
+        for first, second in zip(ordered, ordered[1:]):
+            first_image = images.get(str(first.get("raw_image")))
+            second_image = images.get(str(second.get("raw_image")))
+            if first_image is None or second_image is None:
+                continue
+            estimate = _estimate_pair_displacement_px(first_image, second_image)
+            dx = float(estimate.get("dx", 0.0))
+            dy = float(estimate.get("dy", 0.0))
+            score = float(estimate.get("score", 0.0))
+            norm = float(np.hypot(dx, dy))
+            if score >= 0.08 and norm >= 2.0:
+                vectors.append((dx, dy))
+                scores.append(score)
+            pair_details.append(
+                {
+                    "axis": axis,
+                    "from": {"row": first.get("row"), "col": first.get("col")},
+                    "to": {"row": second.get("row"), "col": second.get("col")},
+                    "vector_px": _round_vector_px(dx, dy),
+                    "score": round(score, 4),
+                    "source": estimate.get("source"),
+                    "candidates": [
+                        {
+                            "source": candidate.get("source"),
+                            "vector_px": _round_vector_px(float(candidate.get("dx", 0.0)), float(candidate.get("dy", 0.0))),
+                            "score": round(float(candidate.get("score", 0.0)), 4),
+                        }
+                        for candidate in estimate.get("candidates", [])
+                    ],
+                }
+            )
+
+    if not vectors:
+        return None, 0.0, pair_details
+    array = np.array(vectors, dtype=np.float32)
+    median = np.median(array, axis=0)
+    distances = np.linalg.norm(array - median, axis=1)
+    median_norm = float(np.linalg.norm(median))
+    threshold = max(24.0, median_norm * 0.45)
+    inlier_mask = distances <= threshold
+    if not np.any(inlier_mask):
+        inlier_mask = np.ones(len(vectors), dtype=bool)
+    inlier_array = array[inlier_mask]
+    vector = _normalize_vector_direction(
+        _round_vector_px(float(np.median(inlier_array[:, 0])), float(np.median(inlier_array[:, 1])))
+    )
+    inlier_scores = np.array(scores, dtype=np.float32)[inlier_mask]
+    confidence = round(float(np.median(inlier_scores)) * (float(inlier_mask.sum()) / max(len(vectors), 1)), 4)
+    return vector, confidence, pair_details
+
+
 def _estimate_axis_step_px(
     cells: list[dict[str, Any]],
     images: dict[str, Any],
@@ -1776,7 +2024,285 @@ def _detect_board_crop(image: Any) -> dict[str, Any]:
     }
 
 
+def _physical_fov_short_mm(tile_width: int, tile_height: int) -> float:
+    if CAMERA_FOV_SHORT_MM > 0:
+        return CAMERA_FOV_SHORT_MM
+    return CAMERA_FOV_LONG_MM * float(tile_height) / max(float(tile_width), 1e-6)
+
+
+def _axis_crop_bounds(origins: list[int], tile_size: int) -> dict[int, tuple[int, int]]:
+    unique_origins = sorted(set(int(origin) for origin in origins))
+    bounds: dict[int, tuple[int, int]] = {}
+    for index, origin in enumerate(unique_origins):
+        if index == 0:
+            left = origin
+        else:
+            previous_origin = unique_origins[index - 1]
+            left = int(round((previous_origin + tile_size + origin) / 2.0))
+        if index == len(unique_origins) - 1:
+            right = origin + tile_size
+        else:
+            next_origin = unique_origins[index + 1]
+            right = int(round((origin + tile_size + next_origin) / 2.0))
+        bounds[origin] = (left, right)
+    return bounds
+
+
+def _physical_origin_px(
+    cell: dict[str, Any],
+    origin_x_mm: float,
+    origin_y_mm: float,
+    px_per_mm_x: float,
+    px_per_mm_y: float,
+    axis_mapping: str,
+) -> tuple[float, float]:
+    slide_x_mm = float(cell.get("x_mm", 0.0)) - origin_x_mm
+    slide_y_mm = float(cell.get("y_mm", 0.0)) - origin_y_mm
+    if axis_mapping == "slide_x_image_x_slide_y_image_y":
+        return slide_x_mm * px_per_mm_x, slide_y_mm * px_per_mm_y
+    if axis_mapping != "slide_y_image_x_slide_x_image_y":
+        raise CameraTriggerError(
+            "LOONGSON_AOI_STITCH_AXIS_MAPPING must be slide_y_image_x_slide_x_image_y "
+            "or slide_x_image_x_slide_y_image_y."
+        )
+    return slide_y_mm * px_per_mm_x, slide_x_mm * px_per_mm_y
+
+
+def _physical_step_vectors_px(
+    step_x_mm: float,
+    step_y_mm: float,
+    px_per_mm_x: float,
+    px_per_mm_y: float,
+    axis_mapping: str,
+) -> tuple[dict[str, int], dict[str, int], int, int, str]:
+    if axis_mapping == "slide_x_image_x_slide_y_image_y":
+        physical_x_px = int(round(step_x_mm * px_per_mm_x))
+        physical_y_px = int(round(step_y_mm * px_per_mm_y))
+        step_x_px = int(FIXED_STEP_X_PX) if FIXED_STEP_X_PX > 0 else physical_x_px
+        step_y_px = int(FIXED_STEP_Y_PX) if FIXED_STEP_Y_PX > 0 else physical_y_px
+        source = "manual_env" if FIXED_STEP_X_PX > 0 or FIXED_STEP_Y_PX > 0 else "physical_fov"
+        return {"dx": step_x_px, "dy": 0}, {"dx": 0, "dy": step_y_px}, step_x_px, step_y_px, source
+
+    if axis_mapping != "slide_y_image_x_slide_x_image_y":
+        raise CameraTriggerError(
+            "LOONGSON_AOI_STITCH_AXIS_MAPPING must be slide_y_image_x_slide_x_image_y "
+            "or slide_x_image_x_slide_y_image_y."
+        )
+
+    physical_x_px = int(round(step_x_mm * px_per_mm_y))
+    physical_y_px = int(round(step_y_mm * px_per_mm_x))
+    step_x_px = int(FIXED_STEP_X_PX) if FIXED_STEP_X_PX > 0 else physical_x_px
+    step_y_px = int(FIXED_STEP_Y_PX) if FIXED_STEP_Y_PX > 0 else physical_y_px
+    source = "manual_env" if FIXED_STEP_X_PX > 0 or FIXED_STEP_Y_PX > 0 else "physical_fov"
+    return {"dx": 0, "dy": step_x_px}, {"dx": step_y_px, "dy": 0}, step_x_px, step_y_px, source
+
+
+def _build_physical_fov_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    cv2 = _import_cv2()
+    import numpy as np  # type: ignore[import-not-found]
+
+    cells = [cell for cell in manifest.get("cells", []) if cell.get("raw_image")]
+    if not cells:
+        raise CameraTriggerError("No captured raw images found in scan manifest.")
+
+    images: dict[str, Any] = {}
+    first_image = None
+    for cell in cells:
+        raw_image = str(cell["raw_image"])
+        image = cv2.imread(str(resolve_artifact(raw_image)))
+        if image is None:
+            continue
+        images[raw_image] = image
+        if first_image is None:
+            first_image = image
+    if first_image is None:
+        raise CameraTriggerError("Could not read captured raw images for physical-FOV mosaic.")
+
+    tile_height, tile_width = first_image.shape[:2]
+    fov_long_mm = CAMERA_FOV_LONG_MM
+    fov_short_mm = _physical_fov_short_mm(tile_width, tile_height)
+    px_per_mm_x = tile_width / max(fov_long_mm, 1e-6)
+    px_per_mm_y = tile_height / max(fov_short_mm, 1e-6)
+
+    plan = manifest.get("plan") or {}
+    step_mm = plan.get("step_mm") or {"x": FIXED_STEP_X_MM, "y": FIXED_STEP_Y_MM}
+    step_x_mm = float(step_mm.get("x", FIXED_STEP_X_MM))
+    step_y_mm = float(step_mm.get("y", FIXED_STEP_Y_MM))
+    origin = plan.get("origin_mm") or {"x": 0.0, "y": 0.0}
+    origin_x_mm = float(origin.get("x", 0.0))
+    origin_y_mm = float(origin.get("y", 0.0))
+    axis_mapping = str(plan.get("axis_mapping") or STITCH_AXIS_MAPPING or "slide_x_image_x_slide_y_image_y").strip().lower()
+    x_vector_px, y_vector_px, step_x_px, step_y_px, step_px_source = _physical_step_vectors_px(
+        step_x_mm,
+        step_y_mm,
+        px_per_mm_x,
+        px_per_mm_y,
+        axis_mapping,
+    )
+
+    raw_origins: list[tuple[dict[str, Any], float, float]] = []
+    for cell in cells:
+        x_units = (float(cell.get("x_mm", 0.0)) - origin_x_mm) / max(step_x_mm, 1e-6)
+        y_units = (float(cell.get("y_mm", 0.0)) - origin_y_mm) / max(step_y_mm, 1e-6)
+        x_float = x_units * float(x_vector_px["dx"]) + y_units * float(y_vector_px["dx"])
+        y_float = x_units * float(x_vector_px["dy"]) + y_units * float(y_vector_px["dy"])
+        raw_origins.append((cell, x_float, y_float))
+
+    min_x = min(origin_x for _, origin_x, _ in raw_origins)
+    min_y = min(origin_y for _, _, origin_y in raw_origins)
+    origins_by_key: dict[str, tuple[int, int]] = {}
+    x_origins: list[int] = []
+    y_origins: list[int] = []
+    for cell, x_float, y_float in raw_origins:
+        x_origin = int(round(x_float - min_x))
+        y_origin = int(round(y_float - min_y))
+        origins_by_key[str(cell["raw_image"])] = (x_origin, y_origin)
+        x_origins.append(x_origin)
+        y_origins.append(y_origin)
+
+    canvas_width = max(origin + tile_width for origin in x_origins)
+    canvas_height = max(origin + tile_height for origin in y_origins)
+    accumulator = np.zeros((canvas_height, canvas_width, 3), dtype=np.float32)
+    weight_sum = np.zeros((canvas_height, canvas_width), dtype=np.float32)
+    placed_cells: list[dict[str, Any]] = []
+
+    def tile_weight(height: int, width: int) -> Any:
+        blend = max(8, min(height, width) // 10)
+        y = np.ones(height, dtype=np.float32)
+        x = np.ones(width, dtype=np.float32)
+        ramp = np.linspace(0.15, 1.0, blend, dtype=np.float32)
+        y[:blend] = ramp
+        y[-blend:] = ramp[::-1]
+        x[:blend] = ramp
+        x[-blend:] = ramp[::-1]
+        return np.outer(y, x)
+
+    base_weight = tile_weight(tile_height, tile_width)
+
+    for cell in cells:
+        raw_image = str(cell["raw_image"])
+        image = images.get(raw_image)
+        if image is None:
+            continue
+        if image.shape[1] != tile_width or image.shape[0] != tile_height:
+            image = cv2.resize(image, (tile_width, tile_height), interpolation=cv2.INTER_AREA)
+        if STITCH_MIRROR_X:
+            image = cv2.flip(image, 1)
+
+        origin_x, origin_y = origins_by_key[raw_image]
+        dst_x1 = origin_x
+        dst_y1 = origin_y
+        dst_x2 = dst_x1 + tile_width
+        dst_y2 = dst_y1 + tile_height
+        accumulator[dst_y1:dst_y2, dst_x1:dst_x2] += image.astype(np.float32) * base_weight[:, :, None]
+        weight_sum[dst_y1:dst_y2, dst_x1:dst_x2] += base_weight
+        placed_cells.append(
+            {
+                "row": cell.get("row"),
+                "col": cell.get("col"),
+                "x_px": dst_x1,
+                "y_px": dst_y1,
+                "width_px": tile_width,
+                "height_px": tile_height,
+                "source_crop_px": [0, 0, tile_width, tile_height],
+                "full_origin_px": {"x": int(origin_x), "y": int(origin_y)},
+                "full_tile_px": {"width": tile_width, "height": tile_height},
+                "mirror_x": bool(STITCH_MIRROR_X),
+                "raw_image": cell.get("raw_image"),
+                "annotated_image": cell.get("annotated_image"),
+            }
+        )
+
+    if not placed_cells:
+        raise CameraTriggerError("No captured cells could be placed into the physical-FOV mosaic.")
+    valid_mask = weight_sum > 1e-6
+    if not np.any(valid_mask):
+        raise CameraTriggerError("Physical-FOV mosaic produced an empty canvas.")
+
+    mosaic_float = np.zeros_like(accumulator, dtype=np.float32)
+    mosaic_float[valid_mask] = accumulator[valid_mask] / weight_sum[valid_mask, None]
+    ys, xs = np.where(valid_mask)
+    crop_left = int(xs.min())
+    crop_top = int(ys.min())
+    crop_right = int(xs.max()) + 1
+    crop_bottom = int(ys.max()) + 1
+    if crop_left > 0 or crop_top > 0 or crop_right < mosaic_float.shape[1] or crop_bottom < mosaic_float.shape[0]:
+        mosaic_float = mosaic_float[crop_top:crop_bottom, crop_left:crop_right]
+        for placement in placed_cells:
+            placement["x_px"] = int(placement["x_px"]) - crop_left
+            placement["y_px"] = int(placement["y_px"]) - crop_top
+            full_origin = placement.get("full_origin_px") or {}
+            full_origin["x"] = int(full_origin.get("x", 0)) - crop_left
+            full_origin["y"] = int(full_origin.get("y", 0)) - crop_top
+            placement["full_origin_px"] = full_origin
+    mosaic = np.clip(mosaic_float, 0, 255).astype(np.uint8)
+
+    overlap_x_px = int(max(0, tile_width - abs(x_vector_px["dx"]) - abs(y_vector_px["dx"])))
+    overlap_y_px = int(max(0, tile_height - abs(x_vector_px["dy"]) - abs(y_vector_px["dy"])))
+    low_overlap_axes = []
+    if overlap_x_px < max(32, int(tile_width * 0.05)):
+        low_overlap_axes.append("image_x")
+    if overlap_y_px < max(32, int(tile_height * 0.05)):
+        low_overlap_axes.append("image_y")
+    if axis_mapping == "slide_y_image_x_slide_x_image_y":
+        fov_width_mm = fov_short_mm
+        fov_height_mm = fov_long_mm
+    else:
+        fov_width_mm = fov_long_mm
+        fov_height_mm = fov_short_mm
+
+    geometry = {
+        "mode": "physical_fov_crop_stitch",
+        "source": "physical_fov",
+        "step_px_source": step_px_source,
+        "crop_strategy": "weighted_overlap",
+        "axis_mapping": axis_mapping,
+        "tile_px": {"width": tile_width, "height": tile_height},
+        "canvas_px": {"width": int(mosaic.shape[1]), "height": int(mosaic.shape[0])},
+        "fov_mm": {
+            "long": round(fov_long_mm, 6),
+            "short": round(fov_short_mm, 6),
+            "width": round(fov_width_mm, 6),
+            "height": round(fov_height_mm, 6),
+            "image_width": round(fov_long_mm, 6),
+            "image_height": round(fov_short_mm, 6),
+        },
+        "px_per_mm": round((px_per_mm_x + px_per_mm_y) / 2.0, 6),
+        "px_per_mm_axes": {"image_x": round(px_per_mm_x, 6), "image_y": round(px_per_mm_y, 6)},
+        "stride_px": {"slide_x": int(step_x_px), "slide_y": int(step_y_px)},
+        "estimated_step_px": {"x": int(step_x_px), "y": int(step_y_px)},
+        "estimated_step_vectors_px": {"x": x_vector_px, "y": y_vector_px},
+        "overlap_px": {"image_x": overlap_x_px, "image_y": overlap_y_px},
+        "overlap_warning": (
+            "Low overlap on " + ", ".join(low_overlap_axes) + "; seams may be visible."
+            if low_overlap_axes
+            else None
+        ),
+        "estimated_px_per_mm": {
+            "x": round(step_x_px / max(step_x_mm, 1e-6), 6),
+            "y": round(step_y_px / max(step_y_mm, 1e-6), 6),
+        },
+        "physical_stride_px": {
+            "x": int(round(step_x_mm * px_per_mm_y if axis_mapping == "slide_y_image_x_slide_x_image_y" else step_x_mm * px_per_mm_x)),
+            "y": int(round(step_y_mm * px_per_mm_x if axis_mapping == "slide_y_image_x_slide_x_image_y" else step_y_mm * px_per_mm_y)),
+        },
+        "estimated_fov_mm": {
+            "width": round(fov_width_mm, 4),
+            "height": round(fov_height_mm, 4),
+        },
+        "stitch_confidence": 1.0,
+        "pcb_size_known": False,
+        "step_mm": {"x": step_x_mm, "y": step_y_mm},
+        "cell_image_transform": {"mirror_x": bool(STITCH_MIRROR_X)},
+    }
+    return mosaic, geometry, placed_cells
+
+
 def _build_auto_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    return _build_physical_fov_crop_mosaic_image(manifest)
+
+
+def _build_auto_vector_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
     cv2 = _import_cv2()
     import numpy as np  # type: ignore[import-not-found]
 
@@ -1798,12 +2324,16 @@ def _build_auto_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[s
         raise CameraTriggerError("Could not read captured raw images for auto-crop mosaic.")
 
     tile_height, tile_width = first_image.shape[:2]
-    step_x_px, score_x, x_pairs = _estimate_axis_step_px(cells, images, "x")
-    step_y_px, score_y, y_pairs = _estimate_axis_step_px(cells, images, "y")
-    if step_x_px is None or step_y_px is None:
+    x_vector_px, score_x, x_pairs = _estimate_axis_vector_px(cells, images, "x")
+    y_vector_px, score_y, y_pairs = _estimate_axis_vector_px(cells, images, "y")
+    if x_vector_px is None or y_vector_px is None:
         raise CameraTriggerError(
             "Could not estimate overlap from adjacent images. Set LOONGSON_AOI_FIXED_STEP_X_PX and "
             "LOONGSON_AOI_FIXED_STEP_Y_PX as a manual fallback."
+        )
+    if min(score_x, score_y) < 0.08:
+        raise CameraTriggerError(
+            f"Estimated stitch confidence is too low: x={score_x:.4f}, y={score_y:.4f}."
         )
 
     plan = manifest.get("plan") or {}
@@ -1813,30 +2343,41 @@ def _build_auto_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[s
     origin = plan.get("origin_mm") or {"x": 0.0, "y": 0.0}
     origin_x_mm = float(origin.get("x", 0.0))
     origin_y_mm = float(origin.get("y", 0.0))
-    px_per_mm_x = step_x_px / max(step_x_mm, 1e-6)
-    px_per_mm_y = step_y_px / max(step_y_mm, 1e-6)
 
     for cell in cells:
+        x_units = (float(cell.get("x_mm", 0.0)) - origin_x_mm) / max(step_x_mm, 1e-6)
+        y_units = (float(cell.get("y_mm", 0.0)) - origin_y_mm) / max(step_y_mm, 1e-6)
+        cell["_origin_px_float"] = {
+            "x": x_units * float(x_vector_px["dx"]) + y_units * float(y_vector_px["dx"]),
+            "y": x_units * float(x_vector_px["dy"]) + y_units * float(y_vector_px["dy"]),
+        }
+
+    min_x = min(float(cell["_origin_px_float"]["x"]) for cell in cells)
+    min_y = min(float(cell["_origin_px_float"]["y"]) for cell in cells)
+    for cell in cells:
         cell["_origin_px"] = {
-            "x": int(round((float(cell.get("x_mm", 0.0)) - origin_x_mm) * px_per_mm_x)),
-            "y": int(round((float(cell.get("y_mm", 0.0)) - origin_y_mm) * px_per_mm_y)),
+            "x": int(round(float(cell["_origin_px_float"]["x"]) - min_x)),
+            "y": int(round(float(cell["_origin_px_float"]["y"]) - min_y)),
         }
 
     max_right = max(int(cell["_origin_px"]["x"]) + tile_width for cell in cells)
     max_bottom = max(int(cell["_origin_px"]["y"]) + tile_height for cell in cells)
-    mosaic = np.zeros((max_bottom, max_right, 3), dtype=np.uint8)
-    filled = np.zeros((max_bottom, max_right), dtype=np.uint8)
-    x_origins = sorted({int(cell["_origin_px"]["x"]) for cell in cells})
-    y_origins = sorted({int(cell["_origin_px"]["y"]) for cell in cells})
-    x_index = {value: index for index, value in enumerate(x_origins)}
-    y_index = {value: index for index, value in enumerate(y_origins)}
+    accumulator = np.zeros((max_bottom, max_right, 3), dtype=np.float32)
+    weight_sum = np.zeros((max_bottom, max_right), dtype=np.float32)
     placed_cells: list[dict[str, Any]] = []
 
-    def crop_bounds(origin_px: int, origins: list[int], index: int, tile_size: int) -> tuple[int, int]:
-        center = origin_px + tile_size / 2.0
-        left = origin_px if index == 0 else int(round(((origins[index - 1] + tile_size / 2.0) + center) / 2.0))
-        right = origin_px + tile_size if index == len(origins) - 1 else int(round((center + (origins[index + 1] + tile_size / 2.0)) / 2.0))
-        return max(origin_px, left), min(origin_px + tile_size, right)
+    def tile_weight(height: int, width: int) -> Any:
+        blend = max(8, min(height, width) // 10)
+        y = np.ones(height, dtype=np.float32)
+        x = np.ones(width, dtype=np.float32)
+        ramp = np.linspace(0.15, 1.0, blend, dtype=np.float32)
+        y[:blend] = ramp
+        y[-blend:] = ramp[::-1]
+        x[:blend] = ramp
+        x[-blend:] = ramp[::-1]
+        return np.outer(y, x)
+
+    base_weight = tile_weight(tile_height, tile_width)
 
     for cell in cells:
         raw_image = str(cell["raw_image"])
@@ -1847,25 +2388,21 @@ def _build_auto_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[s
             image = cv2.resize(image, (tile_width, tile_height), interpolation=cv2.INTER_AREA)
         x0 = int(cell["_origin_px"]["x"])
         y0 = int(cell["_origin_px"]["y"])
-        x1, x2 = crop_bounds(x0, x_origins, x_index[x0], tile_width)
-        y1, y2 = crop_bounds(y0, y_origins, y_index[y0], tile_height)
-        if x2 <= x1 or y2 <= y1:
+        x1 = x0 + tile_width
+        y1 = y0 + tile_height
+        if x1 <= x0 or y1 <= y0:
             continue
-        src_x1 = x1 - x0
-        src_y1 = y1 - y0
-        src_x2 = src_x1 + (x2 - x1)
-        src_y2 = src_y1 + (y2 - y1)
-        mosaic[y1:y2, x1:x2] = image[src_y1:src_y2, src_x1:src_x2]
-        filled[y1:y2, x1:x2] = 1
+        accumulator[y0:y1, x0:x1] += image.astype(np.float32) * base_weight[:, :, None]
+        weight_sum[y0:y1, x0:x1] += base_weight
         placed_cells.append(
             {
                 "row": cell.get("row"),
                 "col": cell.get("col"),
-                "x_px": x1,
-                "y_px": y1,
-                "width_px": x2 - x1,
-                "height_px": y2 - y1,
-                "source_crop_px": [int(src_x1), int(src_y1), int(src_x2 - src_x1), int(src_y2 - src_y1)],
+                "x_px": x0,
+                "y_px": y0,
+                "width_px": tile_width,
+                "height_px": tile_height,
+                "source_crop_px": [0, 0, tile_width, tile_height],
                 "raw_image": cell.get("raw_image"),
                 "annotated_image": cell.get("annotated_image"),
             }
@@ -1873,17 +2410,34 @@ def _build_auto_crop_mosaic_image(manifest: dict[str, Any]) -> tuple[Any, dict[s
 
     if not placed_cells:
         raise CameraTriggerError("No captured cells could be placed into the auto-crop mosaic.")
-    if np.any(filled == 0):
-        mask = filled > 0
-        if np.any(mask):
-            ys, xs = np.where(mask)
-            mosaic = mosaic[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1]
+    valid_mask = weight_sum > 1e-6
+    if not np.any(valid_mask):
+        raise CameraTriggerError("Auto vector mosaic produced an empty canvas.")
+    mosaic = np.zeros_like(accumulator, dtype=np.float32)
+    mosaic[valid_mask] = accumulator[valid_mask] / weight_sum[valid_mask, None]
+    ys, xs = np.where(valid_mask)
+    crop_left = int(xs.min())
+    crop_top = int(ys.min())
+    crop_right = int(xs.max()) + 1
+    crop_bottom = int(ys.max()) + 1
+    if crop_left > 0 or crop_top > 0 or crop_right < mosaic.shape[1] or crop_bottom < mosaic.shape[0]:
+        mosaic = mosaic[crop_top:crop_bottom, crop_left:crop_right]
+        for placement in placed_cells:
+            placement["x_px"] = int(placement["x_px"]) - crop_left
+            placement["y_px"] = int(placement["y_px"]) - crop_top
+    mosaic = np.clip(mosaic, 0, 255).astype(np.uint8)
+
+    step_x_px = int(round(float(np.hypot(float(x_vector_px["dx"]), float(x_vector_px["dy"])))))
+    step_y_px = int(round(float(np.hypot(float(y_vector_px["dx"]), float(y_vector_px["dy"])))))
+    px_per_mm_x = step_x_px / max(step_x_mm, 1e-6)
+    px_per_mm_y = step_y_px / max(step_y_mm, 1e-6)
 
     geometry = {
-        "mode": "auto_crop_overlap",
+        "mode": "auto_vector_overlap",
         "tile_px": {"width": tile_width, "height": tile_height},
         "canvas_px": {"width": int(mosaic.shape[1]), "height": int(mosaic.shape[0])},
         "estimated_step_px": {"x": int(step_x_px), "y": int(step_y_px)},
+        "estimated_step_vectors_px": {"x": x_vector_px, "y": y_vector_px},
         "estimated_px_per_mm": {"x": round(px_per_mm_x, 6), "y": round(px_per_mm_y, 6)},
         "estimated_fov_mm": {
             "width": round(tile_width / max(px_per_mm_x, 1e-6), 4),
@@ -2116,6 +2670,83 @@ def _detect_mosaic_tiles(mosaic: Any, geometry: dict[str, Any], tile_stride_rati
     return _nms_detections(detections), (time.perf_counter() - start) * 1000.0
 
 
+def _build_frames_archive(
+    manifest: dict[str, Any],
+    archive_path: Path,
+    image_field: str,
+    suffix_label: str,
+) -> dict[str, Any]:
+    cells = [cell for cell in manifest.get("cells", []) if cell.get(image_field) or cell.get("raw_image")]
+    ordered_cells = [
+        cell
+        for _, cell in sorted(
+            enumerate(cells, start=1),
+            key=lambda indexed: (int(indexed[1].get("order", indexed[0])), indexed[0]),
+        )
+    ]
+    frames: list[dict[str, Any]] = []
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, cell in enumerate(ordered_cells, start=1):
+            image_ref = str(cell.get(image_field) or "")
+            fallback_raw = False
+            if not image_ref and image_field != "raw_image":
+                image_ref = str(cell.get("raw_image") or "")
+                fallback_raw = True
+            if not image_ref:
+                continue
+            source_path = resolve_artifact(image_ref)
+            if not source_path.exists():
+                continue
+            suffix = source_path.suffix.lower() or ".jpg"
+            entry_name = (
+                f"frame_{index:03d}_r{int(cell.get('row', 0)):03d}_c{int(cell.get('col', 0)):03d}_"
+                f"{suffix_label}{suffix}"
+            )
+            archive.write(source_path, entry_name)
+            frames.append(
+                {
+                    "index": index,
+                    "row": cell.get("row"),
+                    "col": cell.get("col"),
+                    "x_mm": cell.get("x_mm"),
+                    "y_mm": cell.get("y_mm"),
+                    "entry": entry_name,
+                    image_field: image_ref,
+                    "raw_image": cell.get("raw_image"),
+                    "annotated_image": cell.get("annotated_image"),
+                    "fallback_raw": fallback_raw,
+                    "defect_count": len(cell.get("defects") or []),
+                    "status": cell.get("status"),
+                }
+            )
+        archive.writestr(
+            "frames_manifest.json",
+            json.dumps(
+                {
+                    "scan_id": manifest.get("scan_id"),
+                    "created_at": _now_iso(),
+                    "frame_count": len(frames),
+                    "point_order": (manifest.get("plan") or {}).get("point_order"),
+                    "image_field": image_field,
+                    "suffix_label": suffix_label,
+                    "frames": frames,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    return {f"{suffix_label}_frames_zip": _rel(archive_path), f"{suffix_label}_frame_count": len(frames)}
+
+
+def _build_raw_frames_archive(manifest: dict[str, Any], archive_path: Path) -> dict[str, Any]:
+    return _build_frames_archive(manifest, archive_path, "raw_image", "raw")
+
+
+def _build_annotated_frames_archive(manifest: dict[str, Any], archive_path: Path) -> dict[str, Any]:
+    return _build_frames_archive(manifest, archive_path, "annotated_image", "annotated")
+
+
 def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any]:
     start = time.perf_counter()
     manifest = _load_scan_manifest(scan_id)
@@ -2146,6 +2777,10 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
     board_crop_raw_path = mosaic_dir / "board_crop_raw.jpg"
     board_crop_annotated_path = mosaic_dir / "board_crop_annotated.jpg"
     board_crop_metadata_path = mosaic_dir / "board_crop_metadata.json"
+    raw_frames_zip_path = mosaic_dir / "raw_frames.zip"
+    annotated_frames_zip_path = mosaic_dir / "annotated_frames.zip"
+    raw_frames_archive = _build_raw_frames_archive(manifest, raw_frames_zip_path)
+    annotated_frames_archive = _build_annotated_frames_archive(manifest, annotated_frames_zip_path)
 
     detections: list[dict[str, Any]] = []
     cell_defect_audit: dict[str, Any] = {}
@@ -2211,6 +2846,10 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
                 "mosaic_result_json": _rel(result_json_path),
                 "cell_defect_audit": _rel(cell_defect_audit_path),
                 "board_crop": board_crop,
+                "raw_frames_zip": raw_frames_archive.get("raw_frames_zip"),
+                "raw_frame_count": raw_frames_archive.get("raw_frame_count", 0),
+                "annotated_frames_zip": annotated_frames_archive.get("annotated_frames_zip"),
+                "annotated_frame_count": annotated_frames_archive.get("annotated_frame_count", 0),
             },
             file,
             ensure_ascii=False,
@@ -2235,6 +2874,10 @@ def build_scan_mosaic(scan_id: str, run_detection: bool = True) -> dict[str, Any
         "stitch_ms": round((time.perf_counter() - start) * 1000.0, 2),
         "inference_ms": round(inference_ms, 2),
         "geometry": geometry,
+        "raw_frames_zip": raw_frames_archive.get("raw_frames_zip"),
+        "raw_frame_count": raw_frames_archive.get("raw_frame_count", 0),
+        "annotated_frames_zip": annotated_frames_archive.get("annotated_frames_zip"),
+        "annotated_frame_count": annotated_frames_archive.get("annotated_frame_count", 0),
     }
 
 

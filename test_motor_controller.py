@@ -6,6 +6,57 @@ import motor_controller
 
 
 class MotorControllerTests(unittest.TestCase):
+    def test_swap_xy_mapping_routes_logical_x_to_motor_y_and_reports_logical_position(self):
+        original_steps = dict(motor_controller._state.steps)
+        original_homed = dict(motor_controller._state.homed)
+        original_dry_run = motor_controller.DRY_RUN
+        original_mapping = motor_controller.MOTOR_AXIS_MAPPING
+        original_save = motor_controller._state.save
+        original_move_axes_to = motor_controller._move_axes_to
+        captured_targets = {}
+
+        def fake_move_axes_to(targets, **kwargs):
+            captured_targets.update(targets)
+            motor_controller._state.steps.update(targets)
+            return motor_controller.get_position()
+
+        try:
+            motor_controller.DRY_RUN = True
+            motor_controller.MOTOR_AXIS_MAPPING = "physical_x_motor_y_physical_y_motor_x"
+            motor_controller._state.steps.update({"x": 0, "y": 0, "z": 0})
+            motor_controller._state.homed.update({"x": True, "y": True, "z": True})
+            motor_controller._state.save = lambda: None
+            motor_controller._move_axes_to = fake_move_axes_to
+
+            result = motor_controller.move_to_xy(30.0, 18.0)
+
+            self.assertEqual(result["x_mm"], 30.0)
+            self.assertEqual(result["y_mm"], 18.0)
+            self.assertEqual(captured_targets["x"], motor_controller._state.target_steps("x", 18.0))
+            self.assertEqual(captured_targets["y"], motor_controller._state.target_steps("y", 30.0))
+            self.assertEqual(motor_controller._state.steps["x"], motor_controller._state.target_steps("x", 18.0))
+            self.assertEqual(motor_controller._state.steps["y"], motor_controller._state.target_steps("y", 30.0))
+        finally:
+            motor_controller.DRY_RUN = original_dry_run
+            motor_controller.MOTOR_AXIS_MAPPING = original_mapping
+            motor_controller._state.steps.update(original_steps)
+            motor_controller._state.homed.update(original_homed)
+            motor_controller._state.save = original_save
+            motor_controller._move_axes_to = original_move_axes_to
+
+    def test_stream_speed_scale_reflects_requested_speed_above_nominal_default(self):
+        original_steps = dict(motor_controller._state.steps)
+        try:
+            motor_controller._state.steps["x"] = 0
+            target = {"x": motor_controller._state.target_steps("x", 16.0)}
+
+            scale_3 = motor_controller._speed_scale_for_targets(target, 3.0)
+            scale_6 = motor_controller._speed_scale_for_targets(target, 6.0)
+
+            self.assertGreater(scale_6, scale_3)
+        finally:
+            motor_controller._state.steps.update(original_steps)
+
     def test_gpiod_v1_retries_numeric_chip_when_string_chip_is_missing(self):
         fake_gpiod = types.ModuleType("gpiod")
         attempts = []

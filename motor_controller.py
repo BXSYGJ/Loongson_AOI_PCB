@@ -241,6 +241,7 @@ GPIOD_API = os.getenv("LOONGSON_AOI_GPIOD_API", "v1").strip().lower()
 MOTOR_GPIO_BACKEND = os.getenv("LOONGSON_AOI_MOTOR_GPIO_BACKEND", "system_python").strip().lower()
 SYSTEM_GPIO_PYTHON = os.getenv("LOONGSON_AOI_SYSTEM_GPIO_PYTHON", "/usr/bin/python3").strip() or "/usr/bin/python3"
 SYSTEM_GPIO_HELPER = Path(os.getenv("LOONGSON_AOI_SYSTEM_GPIO_HELPER", ROOT / "motor_gpio_system_helper.py")).expanduser()
+MOTOR_AXIS_MAPPING = os.getenv("LOONGSON_AOI_MOTOR_AXIS_MAPPING", "direct").strip().lower()
 
 AXES: dict[str, AxisConfig] = {
     "x": _axis_config("X", default_dir=57, default_step=59),
@@ -324,6 +325,38 @@ class MotionState:
 
 
 _state = MotionState(AXES, STATE_PATH)
+
+
+_DIRECT_XY_MAPPINGS = {"direct", "identity", "physical_x_motor_x_physical_y_motor_y"}
+_SWAP_XY_MAPPINGS = {"swap_xy", "xy_swapped", "physical_x_motor_y_physical_y_motor_x"}
+
+
+def _xy_mapping_mode() -> str:
+    mapping = MOTOR_AXIS_MAPPING.strip().lower()
+    if mapping in _SWAP_XY_MAPPINGS:
+        return "swap_xy"
+    if mapping in _DIRECT_XY_MAPPINGS:
+        return "direct"
+    raise MotorError(
+        "LOONGSON_AOI_MOTOR_AXIS_MAPPING must be one of "
+        f"{sorted(_DIRECT_XY_MAPPINGS | _SWAP_XY_MAPPINGS)}."
+    )
+
+
+def _logical_xy_to_motor_xy(x_mm: float, y_mm: float) -> tuple[float, float]:
+    """Map public UI/scan X/Y coordinates to the physical GPIO motor channels."""
+
+    if _xy_mapping_mode() == "swap_xy":
+        return y_mm, x_mm
+    return x_mm, y_mm
+
+
+def _motor_xy_to_logical_xy(motor_x_mm: float, motor_y_mm: float) -> tuple[float, float]:
+    """Map persisted hardware-channel X/Y state back to public UI coordinates."""
+
+    if _xy_mapping_mode() == "swap_xy":
+        return motor_y_mm, motor_x_mm
+    return motor_x_mm, motor_y_mm
 
 
 class GpioSession:
@@ -771,7 +804,8 @@ def _hard_home_axis(axis: str, gpio: GpioSession) -> None:
 def get_position() -> dict[str, float]:
     """Return the current open-loop position in millimetres."""
 
-    return {f"{axis}_mm": round(_state.mm(axis), 4) for axis in ("x", "y", "z")}
+    logical_x, logical_y = _motor_xy_to_logical_xy(_state.mm("x"), _state.mm("y"))
+    return {"x_mm": round(logical_x, 4), "y_mm": round(logical_y, 4), "z_mm": round(_state.mm("z"), 4)}
 
 
 def get_status() -> dict[str, Any]:
@@ -785,6 +819,8 @@ def get_status() -> dict[str, Any]:
         "gpio_backend": "dry_run" if DRY_RUN else MOTOR_GPIO_BACKEND,
         "system_gpio_python": SYSTEM_GPIO_PYTHON,
         "system_gpio_helper": str(SYSTEM_GPIO_HELPER),
+        "motor_axis_mapping": MOTOR_AXIS_MAPPING,
+        "xy_mapping_mode": _xy_mapping_mode(),
         "home_mode": HOME_MODE,
         "state_path": str(STATE_PATH),
         "position": get_position(),
@@ -822,7 +858,10 @@ def _speed_scale_for_targets(targets: dict[str, int], speed_mm_s: float) -> floa
 
     dominant = _dominant_axis(deltas)
     cfg = AXES[dominant]
-    return max(0.01, min(1.0, speed / max(cfg.max_speed_mm_s, 0.001)))
+    # Treat cfg.max_speed_mm_s as the nominal speed used by the ramping formula,
+    # not as a hidden UI clamp.  The pulse width still limits the real maximum
+    # rate in _interval_for_tick()/motor_gpio_system_helper.py.
+    return max(0.01, speed / max(cfg.max_speed_mm_s, 0.001))
 
 
 def reset_position(x_mm: float = 0.0, y_mm: float = 0.0, z_mm: float = 0.0) -> dict[str, float]:
@@ -833,8 +872,9 @@ def reset_position(x_mm: float = 0.0, y_mm: float = 0.0, z_mm: float = 0.0) -> d
     """
 
     with _motion_lock:
-        _state.steps["x"] = _state.target_steps("x", float(x_mm))
-        _state.steps["y"] = _state.target_steps("y", float(y_mm))
+        motor_x_mm, motor_y_mm = _logical_xy_to_motor_xy(float(x_mm), float(y_mm))
+        _state.steps["x"] = _state.target_steps("x", motor_x_mm)
+        _state.steps["y"] = _state.target_steps("y", motor_y_mm)
         _state.steps["z"] = _state.target_steps("z", float(z_mm))
         for axis in _state.homed:
             _state.homed[axis] = True
@@ -915,8 +955,9 @@ def move_to_xy(x: float, y: float) -> dict[str, float]:
     x_mm = float(x)
     y_mm = float(y)
     with _motion_lock:
-        target_x = _state.target_steps("x", x_mm)
-        target_y = _state.target_steps("y", y_mm)
+        motor_x_mm, motor_y_mm = _logical_xy_to_motor_xy(x_mm, y_mm)
+        target_x = _state.target_steps("x", motor_x_mm)
+        target_y = _state.target_steps("y", motor_y_mm)
         return _move_axes_to({"x": target_x, "y": target_y})
 
 
@@ -938,9 +979,10 @@ def move_to_xy_stream(
     x_mm = float(x)
     y_mm = float(y)
     with _motion_lock:
+        motor_x_mm, motor_y_mm = _logical_xy_to_motor_xy(x_mm, y_mm)
         targets = {
-            "x": _state.target_steps("x", x_mm),
-            "y": _state.target_steps("y", y_mm),
+            "x": _state.target_steps("x", motor_x_mm),
+            "y": _state.target_steps("y", motor_y_mm),
         }
         speed_scale = _speed_scale_for_targets(targets, speed_mm_s)
         return _move_axes_to(

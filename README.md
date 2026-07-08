@@ -165,7 +165,7 @@ You can override the model path and runtime:
 $env:LOONGSON_AOI_WEIGHTS = "D:\AAAED\code\Loongson_AOI_PCB\worktrees\algorithm-ai\runs\detect\pcb_defects\weights\best.onnx"
 $env:LOONGSON_AOI_ALGORITHM_ROOT = "D:\AAAED\code\Loongson_AOI_PCB\worktrees\algorithm-ai"
 $env:LOONGSON_AOI_DETECTOR_BACKEND = "onnx"
-$env:LOONGSON_AOI_YOLO_CONF = "0.5"
+$env:LOONGSON_AOI_YOLO_CONF = "0.3"
 $env:LOONGSON_AOI_YOLO_IMGSZ = "640"
 ```
 
@@ -318,8 +318,8 @@ a confirmed defect while weaker one-off evidence is kept as suspected. Fusion
 thresholds can be tuned without code changes:
 
 ```powershell
-$env:LOONGSON_AOI_PHONE_CONFIRM_CONF = "0.5"
-$env:LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF = "0.35"
+$env:LOONGSON_AOI_PHONE_CONFIRM_CONF = "0.3"
+$env:LOONGSON_AOI_PHONE_MULTI_CONFIRM_CONF = "0.3"
 $env:LOONGSON_AOI_PHONE_SUSPECTED_CONF = "0.2"
 $env:LOONGSON_AOI_PHONE_FUSION_IOU = "0.45"
 ```
@@ -340,21 +340,41 @@ Real mode does not require the user to know the PCB size. The website scans a
 fixed 16-point window using the teammate-provided step spacing:
 
 ```text
-X step: 16 mm
-Y step: 24 mm
+X step: 30 mm
+Y step: 18 mm
 Camera frame: 1280 x 800
 ```
 
 The first frame is captured before any XY movement. After all 16 images are
-captured, the backend drains the per-cell detection queue, builds the mosaic,
-emits `mosaic_result`, and only then returns the slide to the origin. This lets
-the UI enter the stitching/result stage without waiting for the origin-return
-move.
+captured, the backend requests an origin return immediately, then drains the
+per-cell detection queue and builds the mosaic. This keeps the slide from
+waiting at the final scan point while the software finishes stitching and
+summary work.
 
 The real-mode UI exposes two motion parameters:
 
 - `滑台速度 mm/s`: sent as `motion_speed_mm_s`.
 - `停稳时间 s`: sent as `settle_seconds`.
+
+The motor driver now uses `motion_speed_mm_s` as the requested pulse rate for
+continuous XY moves instead of silently clamping every value above the nominal
+axis speed to the same output. Extremely high values are still physically capped
+by the configured pulse width, so practical tuning should compare values such as
+`1`, `3`, and `6` mm/s before going higher.
+
+The fixed-16 mosaic path has a validation test that cuts a real `val` PCB image
+into 16 overlapping camera tiles and restores it through the same stitcher:
+
+```powershell
+python -m unittest test_mosaic.ScanMosaicTests.test_auto_crop_mosaic_restores_real_val_image_from_sixteen_overlapping_tiles
+```
+
+If a real-board mosaic is unreadable while this test passes, inspect the scan's
+`mosaic/mosaic_manifest.json`, especially `geometry.estimated_step_px`,
+`geometry.cell_image_transform`, and `geometry.axis_mapping`. The current camera
+mount needs horizontal mirroring before stitching, so `LOONGSON_AOI_STITCH_MIRROR_X`
+defaults to `1`. Set it to `0` only if a future camera installation no longer
+needs that correction.
 
 Common scan variables:
 
@@ -363,6 +383,7 @@ $env:LOONGSON_AOI_DEBOUNCE_SECONDS = "0.05"
 $env:LOONGSON_AOI_MOTOR_DRY_RUN = "0"
 $env:LOONGSON_AOI_HOME_MODE = "soft"
 $env:LOONGSON_AOI_CAMERA_SOURCE = "0"
+$env:LOONGSON_AOI_STITCH_MIRROR_X = "1"
 ```
 
 With no limit switches installed, place the slide at the physical origin and run
