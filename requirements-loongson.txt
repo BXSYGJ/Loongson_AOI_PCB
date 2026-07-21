@@ -1,0 +1,9 @@
+fastapi<0.104
+uvicorn<0.24
+pydantic<2
+websockets
+anyio
+sniffio
+h11
+click
+typing_extensions
