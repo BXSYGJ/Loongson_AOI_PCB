@@ -1,0 +1,15 @@
+[Unit]
+Description=Loongson AOI v1.0.0 full web console
+After=network-online.target aoi-cloud.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Loongson_AOI_PCB/worktrees/cloud-cooperative-platform
+EnvironmentFile=/root/Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/.env
+ExecStart=/root/Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8020
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
