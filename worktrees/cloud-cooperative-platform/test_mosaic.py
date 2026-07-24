@@ -1370,17 +1370,24 @@ class ScanMosaicTests(unittest.TestCase):
                 remove_tree_retry(scan_dir)
 
     def test_auto_crop_mosaic_restores_real_val_image_from_sixteen_overlapping_tiles(self):
-        val_image = (
+        filename = "136_png_jpg.rf.8b766410155d072086a106d12f7096b6.jpg"
+        candidates = (
             camera_trigger.ROOT.parent.parent
             / "pcb_defects_training_package_20260704_035505"
             / "datasets"
             / "pcb_defects"
             / "images"
             / "val"
-            / "136_png_jpg.rf.8b766410155d072086a106d12f7096b6.jpg"
+            / filename,
+            camera_trigger.ROOT.parent.parent
+            / "tests"
+            / "fixtures"
+            / "val_136_139"
+            / "images"
+            / filename,
         )
-        if not val_image.exists():
-            self.skipTest(f"val image not available: {val_image}")
+        val_image = next((path for path in candidates if path.exists()), None)
+        self.assertIsNotNone(val_image, f"val image not available: {candidates}")
 
         scan_id = f"unit-fixed-val16-{uuid.uuid4().hex[:8]}"
         scan_dir = camera_trigger.SCAN_OUTPUT_DIR / scan_id
