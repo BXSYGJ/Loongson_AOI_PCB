@@ -1,0 +1,22 @@
+﻿[
+  {
+    "image": "field_20260705_173547_248.jpg",
+    "kind": "positive",
+    "annotation": "field_20260705_173547_248.json"
+  },
+  {
+    "image": "field_20260705_173735_117.jpg",
+    "kind": "positive",
+    "annotation": "field_20260705_173735_117.json"
+  },
+  {
+    "image": "field_20260705_200234_741.jpg",
+    "kind": "negative_no_defect",
+    "annotation": null
+  },
+  {
+    "image": "field_20260705_200236_875.jpg",
+    "kind": "negative_no_defect",
+    "annotation": null
+  }
+]

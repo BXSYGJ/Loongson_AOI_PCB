@@ -1,0 +1,22 @@
+path: ../../../../datasets7.15现场增强后/pcb_defects
+train: images/train
+val: images/val
+test: images/val
+
+names:
+  0: dry_solder_joint
+  1: improper_installation
+  2: pcb_damage
+  3: short_circuit
+  4: insufficient_solder
+  5: reverse_component
+  6: excess_solder
+
+cn_names:
+  dry_solder_joint: dry_solder_joint
+  improper_installation: improper_installation
+  pcb_damage: pcb_damage
+  short_circuit: short_circuit
+  insufficient_solder: insufficient_solder
+  reverse_component: reverse_component
+  excess_solder: excess_solder

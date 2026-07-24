@@ -1,0 +1,22 @@
+﻿[
+  {
+    "image": "136_png_jpg.rf.8b766410155d072086a106d12f7096b6.jpg",
+    "label": "136_png_jpg.rf.8b766410155d072086a106d12f7096b6.txt",
+    "source": "datasets7.15现场增强后/pcb_defects/val"
+  },
+  {
+    "image": "137_png_jpg.rf.2b42e9b6916b542b10065e45a22d52d4.jpg",
+    "label": "137_png_jpg.rf.2b42e9b6916b542b10065e45a22d52d4.txt",
+    "source": "datasets7.15现场增强后/pcb_defects/val"
+  },
+  {
+    "image": "138_png_jpg.rf.d28bf1161237d56b190f15c127114f27.jpg",
+    "label": "138_png_jpg.rf.d28bf1161237d56b190f15c127114f27.txt",
+    "source": "datasets7.15现场增强后/pcb_defects/val"
+  },
+  {
+    "image": "139_png_jpg.rf.bd5304714a38a924b0ac65d3c470f4fd.jpg",
+    "label": "139_png_jpg.rf.bd5304714a38a924b0ac65d3c470f4fd.txt",
+    "source": "datasets7.15现场增强后/pcb_defects/val"
+  }
+]

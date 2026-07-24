@@ -1,0 +1,3 @@
+# Camera source selected from the AOI web UI.
+# Examples: 0, 1, /dev/video0, rtsp://...
+0

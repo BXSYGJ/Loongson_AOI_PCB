@@ -1,0 +1,106 @@
+﻿{
+    "generated_at":  "2026-07-23T00:57:21.9713420+08:00",
+    "methodology":  "single_run_per_combination",
+    "note":  "One retained measurement per combination. Network and service load can affect latency.",
+    "target_type":  "phone",
+    "upload_id":  "20260721_190104_ee012a75",
+    "expected_markdown_heading_count":  6,
+    "results":  [
+                    {
+                        "name":  "plus_non_thinking",
+                        "requested_model":  "qwen3.7-plus",
+                        "executed_model":  "qwen3.7-plus",
+                        "thinking_enabled":  false,
+                        "server_elapsed_ms":  23183.26,
+                        "client_elapsed_ms":  23689.66,
+                        "prompt_tokens":  1969,
+                        "completion_tokens":  1222,
+                        "total_tokens":  3191,
+                        "markdown_heading_count":  6,
+                        "six_sections_complete":  true,
+                        "report_length":  3613,
+                        "report_snapshot":  "D:\\AAAED\\code\\Loongson_AOI_PCB\\dist\\llm_model_benchmark_reports_20260723\\plus_non_thinking.md",
+                        "error":  null
+                    },
+                    {
+                        "name":  "flash_non_thinking",
+                        "requested_model":  "qwen3.6-flash",
+                        "executed_model":  "qwen3.6-flash",
+                        "thinking_enabled":  false,
+                        "server_elapsed_ms":  8454.36,
+                        "client_elapsed_ms":  8537.22,
+                        "prompt_tokens":  1969,
+                        "completion_tokens":  1304,
+                        "total_tokens":  3273,
+                        "markdown_heading_count":  6,
+                        "six_sections_complete":  true,
+                        "report_length":  4252,
+                        "report_snapshot":  "D:\\AAAED\\code\\Loongson_AOI_PCB\\dist\\llm_model_benchmark_reports_20260723\\flash_non_thinking.md",
+                        "error":  null
+                    },
+                    {
+                        "name":  "flash_thinking",
+                        "requested_model":  "qwen3.6-flash",
+                        "executed_model":  "qwen3.6-flash",
+                        "thinking_enabled":  true,
+                        "server_elapsed_ms":  18970.32,
+                        "client_elapsed_ms":  19093.69,
+                        "prompt_tokens":  1967,
+                        "completion_tokens":  3157,
+                        "total_tokens":  5124,
+                        "markdown_heading_count":  6,
+                        "six_sections_complete":  true,
+                        "report_length":  2823,
+                        "report_snapshot":  "D:\\AAAED\\code\\Loongson_AOI_PCB\\dist\\llm_model_benchmark_reports_20260723\\flash_thinking.md",
+                        "error":  null
+                    },
+                    {
+                        "name":  "max_non_thinking",
+                        "requested_model":  "qwen3.7-max",
+                        "executed_model":  "qwen3.7-max-2026-06-08",
+                        "thinking_enabled":  false,
+                        "server_elapsed_ms":  24106.87,
+                        "client_elapsed_ms":  24230.7,
+                        "prompt_tokens":  1969,
+                        "completion_tokens":  1296,
+                        "total_tokens":  3265,
+                        "markdown_heading_count":  6,
+                        "six_sections_complete":  true,
+                        "report_length":  4061,
+                        "report_snapshot":  "D:\\AAAED\\code\\Loongson_AOI_PCB\\dist\\llm_model_benchmark_reports_20260723\\max_non_thinking.md",
+                        "error":  null
+                    },
+                    {
+                        "name":  "max_thinking",
+                        "requested_model":  "qwen3.7-max",
+                        "executed_model":  "qwen3.7-max-2026-06-08",
+                        "thinking_enabled":  true,
+                        "server_elapsed_ms":  33085.56,
+                        "client_elapsed_ms":  33209.9,
+                        "prompt_tokens":  1967,
+                        "completion_tokens":  1715,
+                        "total_tokens":  3682,
+                        "markdown_heading_count":  6,
+                        "six_sections_complete":  true,
+                        "report_length":  3042,
+                        "report_snapshot":  "D:\\AAAED\\code\\Loongson_AOI_PCB\\dist\\llm_model_benchmark_reports_20260723\\max_thinking.md",
+                        "error":  null
+                    }
+                ],
+    "flash_vs_plus":  [
+                          {
+                              "candidate":  "flash_non_thinking",
+                              "baseline":  "plus_non_thinking",
+                              "seconds_saved":  14.729,
+                              "speedup_percent":  63.53,
+                              "total_token_difference":  82
+                          },
+                          {
+                              "candidate":  "flash_thinking",
+                              "baseline":  "plus_non_thinking",
+                              "seconds_saved":  4.213,
+                              "speedup_percent":  18.17,
+                              "total_token_difference":  1933
+                          }
+                      ]
+}

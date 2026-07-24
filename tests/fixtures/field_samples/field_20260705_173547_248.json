@@ -1,0 +1,28 @@
+{
+  "version": "6.3.1",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "dry_solder_joint",
+      "points": [
+        [
+          475.6060606060606,
+          594.6969696969696
+        ],
+        [
+          569.5454545454546,
+          684.0909090909091
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "field_20260705_173547_248.jpg",
+  "imageData": null,
+  "imageHeight": 800,
+  "imageWidth": 1280
+}
