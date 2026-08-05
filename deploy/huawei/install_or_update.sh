@@ -6,6 +6,12 @@ PROJECT_ROOT="/root/Loongson_AOI_PCB"
 STAGE_ROOT="/root/aoi_v1_update"
 BACKUP_ROOT="/root/aoi_v1_backup_$(date +%Y%m%d_%H%M%S)"
 
+export DEBIAN_FRONTEND=noninteractive
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-90}"
+apt-get update
+apt-get install -y python3 python3-venv python3-pip rsync unzip libgl1 libglib2.0-0t64
+
 systemctl stop aoi-web 2>/dev/null || true
 systemctl stop aoi-cloud 2>/dev/null || true
 rm -rf "$STAGE_ROOT"
@@ -37,6 +43,9 @@ if [ ! -f "$PROJECT_ROOT/cloud-backend/.env" ]; then
 fi
 if [ ! -f "$PROJECT_ROOT/worktrees/cloud-cooperative-platform/.env" ]; then
   cp "$SOURCE_ROOT/config/private/cloud-web.env" "$PROJECT_ROOT/worktrees/cloud-cooperative-platform/.env"
+fi
+if ! grep -q '^LOONGSON_AOI_STATUS_CAMERA_PROBE=' "$PROJECT_ROOT/worktrees/cloud-cooperative-platform/.env"; then
+  printf '%s\n' 'LOONGSON_AOI_STATUS_CAMERA_PROBE=0' >> "$PROJECT_ROOT/worktrees/cloud-cooperative-platform/.env"
 fi
 cp "$SOURCE_ROOT/config/private/llm_config.local.ps1" "$PROJECT_ROOT/worktrees/cloud-cooperative-platform/llm_config.local.ps1"
 

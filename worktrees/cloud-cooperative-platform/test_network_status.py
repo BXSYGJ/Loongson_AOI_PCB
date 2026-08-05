@@ -18,17 +18,17 @@ class NetworkStatusTests(unittest.TestCase):
             {
                 "type": "http",
                 "scheme": "http",
-                "server": ("1.92.113.191", 8020),
+                "server": ("116.205.117.33", 8020),
                 "path": "/api/system/status",
                 "query_string": b"",
-                "headers": [(b"host", b"1.92.113.191:8020")],
+                "headers": [(b"host", b"116.205.117.33:8020")],
             }
         )
 
         with patch.object(main, "local_ipv4_addresses", return_value=["192.168.0.124"]):
             status = main.network_status(request)
 
-        self.assertEqual(status["phone_urls"][0], "http://1.92.113.191:8020/phone")
+        self.assertEqual(status["phone_urls"][0], "http://116.205.117.33:8020/phone")
         self.assertIn("http://192.168.0.124:8020/phone", status["phone_urls"])
 
     def test_real_mode_always_keeps_traceable_cell_fusion_results(self) -> None:

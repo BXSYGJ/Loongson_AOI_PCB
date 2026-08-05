@@ -50,8 +50,8 @@ Keep long-term AK/SK only on ECS. The mini program receives only short-lived upl
 For the current competition deployment:
 
 ```text
-Full website: http://1.92.113.191:8020/
-Cloud backend: http://1.92.113.191:8010/
+Full website: http://116.205.117.33:8020/
+Cloud backend: http://116.205.117.33:8010/
 OBS bucket: loongson-aoi-pcb
 Region: cn-north-4
 ```
@@ -60,7 +60,7 @@ The website should point to this backend through:
 
 ```powershell
 $env:LOONGSON_AOI_CLOUD_DETECTION_ENABLED = "1"
-$env:LOONGSON_AOI_CLOUD_API_BASE = "http://1.92.113.191:8010"
+$env:LOONGSON_AOI_CLOUD_API_BASE = "http://116.205.117.33:8010"
 ```
 
 ## API Flow

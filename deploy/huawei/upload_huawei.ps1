@@ -12,6 +12,31 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+function Resolve-OpenSshTool {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('scp.exe', 'ssh.exe')]
+        [string]$Name
+    )
+
+    $command = Get-Command -Name $Name -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $systemTool = [System.IO.Path]::Combine(
+        $env:SystemRoot,
+        'System32',
+        'OpenSSH',
+        $Name
+    )
+    if (Test-Path -LiteralPath $systemTool -PathType Leaf) {
+        return $systemTool
+    }
+
+    throw "未找到 OpenSSH 工具：$Name"
+}
+
 try {
     $scriptDirectory = [System.IO.Path]::GetDirectoryName($PSCommandPath)
     $projectRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($scriptDirectory, '..', '..'))
@@ -20,8 +45,8 @@ try {
         throw "未找到华为云部署包：$packagePath"
     }
 
-    $scp = (Get-Command -Name 'scp.exe' -ErrorAction Stop).Source
-    $ssh = (Get-Command -Name 'ssh.exe' -ErrorAction Stop).Source
+    $scp = Resolve-OpenSshTool -Name 'scp.exe'
+    $ssh = Resolve-OpenSshTool -Name 'ssh.exe'
     $target = "$UserName@$HostAddress"
     $commonArguments = @()
     if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
@@ -37,7 +62,7 @@ try {
     Write-Output 'v1.0.0 华为云部署包上传完成。'
 
     if (-not $UploadOnly) {
-        $remoteCommand = "unzip -p /root/Loongson_AOI_PCB_huawei_cloud.zip Loongson_AOI_PCB/deploy/huawei/install_or_update.sh > /root/install_aoi_v1.sh && chmod 700 /root/install_aoi_v1.sh && /root/install_aoi_v1.sh /root/Loongson_AOI_PCB_huawei_cloud.zip"
+        $remoteCommand = "command -v unzip >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y unzip); unzip -p /root/Loongson_AOI_PCB_huawei_cloud.zip Loongson_AOI_PCB/deploy/huawei/install_or_update.sh > /root/install_aoi_v1.sh && chmod 700 /root/install_aoi_v1.sh && /root/install_aoi_v1.sh /root/Loongson_AOI_PCB_huawei_cloud.zip"
         $sshArguments = @($commonArguments) + @($target, $remoteCommand)
         & $ssh @sshArguments
         if ($LASTEXITCODE -ne 0) {

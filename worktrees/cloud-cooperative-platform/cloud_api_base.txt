@@ -1,2 +1,2 @@
 # Huawei Cloud detection backend used when LOONGSON_AOI_CLOUD_API_BASE is not set.
-http://1.92.113.191:8010
+http://116.205.117.33:8010

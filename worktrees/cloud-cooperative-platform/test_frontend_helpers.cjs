@@ -1,12 +1,19 @@
 const assert = require("node:assert/strict");
-const helpers = require("./static/app_helpers.js");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const helperPath = path.join(__dirname, "static", "app_helpers.js");
+delete globalThis.AoiUiHelpers;
+vm.runInThisContext(fs.readFileSync(helperPath, "utf8"), { filename: helperPath });
+const helpers = globalThis.AoiUiHelpers;
 
 assert.equal(
   helpers.preferredPhoneUploadUrl([
-    "http://1.92.113.191:8020/phone",
+    "http://116.205.117.33:8020/phone",
     "http://192.168.0.124:8020/phone",
   ]),
-  "http://1.92.113.191:8020/phone",
+  "http://116.205.117.33:8020/phone",
 );
 assert.equal(helpers.preferredPhoneUploadUrl([]), "");
 assert.equal(helpers.preferredPhoneUploadUrl(null), "");

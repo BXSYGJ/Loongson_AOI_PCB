@@ -180,7 +180,7 @@ Uvicorn:
 
 ```powershell
 $env:LOONGSON_AOI_CLOUD_DETECTION_ENABLED = "1"
-$env:LOONGSON_AOI_CLOUD_API_BASE = "http://1.92.113.191:8010"
+$env:LOONGSON_AOI_CLOUD_API_BASE = "http://116.205.117.33:8010"
 $env:LOONGSON_AOI_CLOUD_TIMEOUT_SECONDS = "90"
 $env:LOONGSON_AOI_CLOUD_POLL_SECONDS = "0.35"
 ```
@@ -203,7 +203,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8020
   "cloud_detection": {
     "enabled": true,
     "configured": true,
-    "api_base": "http://1.92.113.191:8010"
+    "api_base": "http://116.205.117.33:8010"
   }
 }
 ```

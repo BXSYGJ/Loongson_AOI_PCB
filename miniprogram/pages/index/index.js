@@ -42,7 +42,7 @@ function storedLlmModel() {
 }
 
 function baseUrlFromApp() {
-  return String(app.globalData.consoleApiBase || "http://172.25.208.1:8020").replace(/\/$/, "");
+  return String(app.globalData.consoleApiBase || "http://116.205.117.33:8020").replace(/\/$/, "");
 }
 
 function absoluteUrl(base, value) {

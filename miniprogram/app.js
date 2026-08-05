@@ -1,7 +1,7 @@
 App({
   globalData: {
-    consoleApiBase: "http://172.25.208.1:8020",
-    cloudApiBase: "http://1.92.113.191:8010",
-    cloudWsBase: "ws://1.92.113.191:8010"
+    consoleApiBase: "http://116.205.117.33:8020",
+    cloudApiBase: "http://116.205.117.33:8010",
+    cloudWsBase: "ws://116.205.117.33:8010"
   }
 });
