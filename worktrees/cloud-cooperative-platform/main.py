@@ -48,6 +48,7 @@ OPERATION_MODES = {"simulation", "real", "phone", "mock"}
 DETECTION_PLATFORMS = {"huawei_cloud", "phone_browser", "local_dnn"}
 DEFAULT_DETECTION_PLATFORM = "huawei_cloud"
 PHONE_EXPERIMENT_PROFILES = {"cloud_baseline", "phone_link_sim", "local_link_sim"}
+DEFAULT_EXPERIMENT_PROFILE = "local_link_sim"
 PHONE_WORKER_TIMEOUT_SECONDS = float(os.getenv("LOONGSON_AOI_PHONE_WORKER_TIMEOUT_SECONDS", "20"))
 
 
@@ -340,7 +341,7 @@ def normalize_phone_experiment_profile(value: Any = None, legacy_platform: Any =
         "local": "local_link_sim",
     }
     if not profile_value:
-        profile_value = str(legacy_platform or DEFAULT_DETECTION_PLATFORM).strip().lower()
+        profile_value = str(legacy_platform or DEFAULT_EXPERIMENT_PROFILE).strip().lower()
     experiment_profile = aliases.get(profile_value, profile_value)
     if experiment_profile not in PHONE_EXPERIMENT_PROFILES:
         raise ValueError(
@@ -489,11 +490,30 @@ async def detect_phone_upload_selected_platform(
     detection_platform: str | None = None,
     operation_mode: str = "real_browser_camera",
 ) -> dict[str, Any]:
+    experiment_profile = normalize_phone_experiment_profile(None, detection_platform)
+    return await detect_phone_upload_cloud_experiment(
+        upload_id,
+        detection_profile,
+        experiment_profile,
+        operation_mode=operation_mode,
+        apply_simulated_delay=False,
+    )
+
+
+async def detect_phone_upload_cloud_experiment(
+    upload_id: str,
+    detection_profile: str | None,
+    experiment_profile: str | None,
+    *,
+    operation_mode: str,
+    apply_simulated_delay: bool,
+) -> dict[str, Any]:
     profile_config = camera_trigger.phone_detection_profile_config(detection_profile)
-    selected_platform = normalize_detection_platform(detection_platform)
+    selected_profile = normalize_phone_experiment_profile(experiment_profile)
     metadata = camera_trigger.get_phone_upload(upload_id)
     raw_path = camera_trigger.resolve_artifact(metadata["raw_image"])
     upload_dir = raw_path.parent
+    started = time.perf_counter()
     result = await detect_artifact_platform_first(
         metadata["raw_image"],
         upload_dir / "annotated.jpg",
@@ -503,7 +523,9 @@ async def detect_phone_upload_selected_platform(
             "upload_id": upload_id,
             "detection_profile": profile_config["profile"],
             "detection_profile_label": profile_config["label"],
-            "detection_platform": selected_platform,
+            "detection_platform": "huawei_cloud",
+            "experiment_profile": selected_profile,
+            "phone_experiment_profile": selected_profile,
         },
     )
     if not result.get("ok"):
@@ -511,7 +533,25 @@ async def detect_phone_upload_selected_platform(
     result["upload_id"] = upload_id
     result["detection_profile"] = profile_config["profile"]
     result["detection_profile_label"] = profile_config["label"]
-    result["detection_platform"] = selected_platform
+    cloud_inference_ms = float(result.get("inference_ms") or ((time.perf_counter() - started) * 1000.0))
+    delay_seconds = (
+        phone_experiment_delay_seconds(selected_profile, profile_config["profile"])
+        if apply_simulated_delay
+        else 0.0
+    )
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
+    measured_total_ms = (time.perf_counter() - started) * 1000.0
+    result["experiment_profile"] = selected_profile
+    result["executed_platform"] = "huawei_cloud"
+    result["detection_platform"] = "huawei_cloud"
+    result["inference_location"] = "huawei_cloud"
+    result["cloud_inference_ms"] = round(cloud_inference_ms, 2)
+    result["simulated_delay_ms"] = round(delay_seconds * 1000.0, 2)
+    result["total_elapsed_ms"] = round(
+        max(measured_total_ms, cloud_inference_ms + delay_seconds * 1000.0),
+        2,
+    )
     result["operation_mode"] = operation_mode
     return camera_trigger.store_phone_detection_result(
         upload_id,
@@ -527,64 +567,26 @@ async def detect_phone_upload_phone_first(
     detection_platform: str | None = None,
     phone_experiment_profile: str | None = None,
 ) -> dict[str, Any]:
-    profile_config = camera_trigger.phone_detection_profile_config(detection_profile)
     experiment_profile = normalize_phone_experiment_profile(phone_experiment_profile, detection_platform)
-    metadata = camera_trigger.get_phone_upload(upload_id)
-    raw_path = camera_trigger.resolve_artifact(metadata["raw_image"])
-    upload_dir = raw_path.parent
-    started = time.perf_counter()
-    result = await detect_artifact_platform_first(
-        metadata["raw_image"],
-        upload_dir / "annotated.jpg",
-        upload_dir / "result.json",
-        {
-            "operation_mode": "phone",
-            "upload_id": upload_id,
-            "detection_profile": profile_config["profile"],
-            "detection_profile_label": profile_config["label"],
-            "detection_platform": "huawei_cloud",
-            "phone_experiment_profile": experiment_profile,
-        },
-    )
-    if not result.get("ok"):
-        raise camera_trigger.CameraTriggerError(result.get("message") or "Phone upload detection failed.")
-    result["upload_id"] = upload_id
-    result["detection_profile"] = profile_config["profile"]
-    result["detection_profile_label"] = profile_config["label"]
-    cloud_inference_ms = float(result.get("inference_ms") or ((time.perf_counter() - started) * 1000.0))
-    delay_seconds = phone_experiment_delay_seconds(experiment_profile, profile_config["profile"])
-    if delay_seconds > 0:
-        await asyncio.sleep(delay_seconds)
-    measured_total_ms = (time.perf_counter() - started) * 1000.0
-    result["experiment_profile"] = experiment_profile
-    result["executed_platform"] = "huawei_cloud"
-    result["detection_platform"] = "huawei_cloud"
-    result["inference_location"] = "huawei_cloud"
-    result["cloud_inference_ms"] = round(cloud_inference_ms, 2)
-    result["simulated_delay_ms"] = round(delay_seconds * 1000.0, 2)
-    result["total_elapsed_ms"] = round(
-        max(measured_total_ms, cloud_inference_ms + delay_seconds * 1000.0),
-        2,
-    )
-    result["operation_mode"] = "phone"
-    return camera_trigger.store_phone_detection_result(
+    return await detect_phone_upload_cloud_experiment(
         upload_id,
-        result,
-        profile_config["profile"],
-        profile_config["label"],
+        detection_profile,
+        experiment_profile,
+        operation_mode="phone",
+        apply_simulated_delay=True,
     )
 
 
 async def run_phone_batch_detection(
     batch_id: str,
     detection_profile: str = "precision",
-    phone_experiment_profile: str = "cloud_baseline",
+    phone_experiment_profile: str = DEFAULT_EXPERIMENT_PROFILE,
     *,
     detector: Any = None,
 ) -> dict[str, Any]:
     detector_fn = detector or detect_phone_upload_phone_first
     profile_config = camera_trigger.phone_detection_profile_config(detection_profile)
-    experiment_profile = normalize_phone_experiment_profile(phone_experiment_profile, "huawei_cloud")
+    experiment_profile = normalize_phone_experiment_profile(phone_experiment_profile)
     camera_trigger.update_phone_batch(
         batch_id,
         status="queued",
@@ -842,8 +844,10 @@ def system_status(request: Request | None = None) -> dict[str, Any]:
         "llm_report": llm_reporter.status(),
         "scan": {
             "running": scan_running,
-            "modes": ["simulation", "real", "phone"],
-            "mode_hint": "simulation uses an uploaded image; real uses stop-and-shoot slide motion and camera capture; phone uses LAN image upload and whole-image detection.",
+            "modes": ["real", "phone"],
+            "mode_hint": "real uses stop-and-shoot slide motion and camera capture; phone uses image upload and whole-image detection; both execute inference on Huawei Cloud.",
+            "experiment_profiles": ["local_link_sim", "phone_link_sim", "cloud_baseline"],
+            "default_experiment_profile": DEFAULT_EXPERIMENT_PROFILE,
             "video": camera_trigger.video_status(),
         },
         "network": network_status(request),
@@ -1243,7 +1247,10 @@ async def run_real_scan_capture_queue(
     plan: dict[str, Any],
     detection_platform: str,
     stop_event: asyncio.Event,
+    experiment_profile: str = DEFAULT_EXPERIMENT_PROFILE,
 ) -> None:
+    detection_platform = "huawei_cloud"
+    experiment_profile = normalize_phone_experiment_profile(experiment_profile)
     cells = iter_snake_cells(plan)
     total = len(cells)
     settle_seconds = float(plan.get("settle_seconds", DEBOUNCE_SECONDS) or DEBOUNCE_SECONDS)
@@ -1256,6 +1263,9 @@ async def run_real_scan_capture_queue(
     plan_payload = dict(plan)
     plan_payload["operation_mode"] = "real"
     plan_payload["detection_platform"] = detection_platform
+    plan_payload["executed_platform"] = detection_platform
+    plan_payload["experiment_profile"] = experiment_profile
+    plan_payload["simulated_delay_ms"] = 0
     plan_payload["capture_pipeline"] = "capture_first_async_detection_queue"
     plan_payload["motion_speed_mm_s"] = motion_speed_mm_s
 
@@ -1315,6 +1325,9 @@ async def run_real_scan_capture_queue(
             "idle": pending == 0 and active is None,
             "operation_mode": "real",
             "detection_platform": detection_platform,
+            "executed_platform": detection_platform,
+            "experiment_profile": experiment_profile,
+            "simulated_delay_ms": 0,
         }
 
     async def emit_queue() -> None:
@@ -1365,6 +1378,7 @@ async def run_real_scan_capture_queue(
                         "y_mm": y_mm,
                         "capture_source": "camera",
                         "detection_platform": detection_platform,
+                        "experiment_profile": experiment_profile,
                     },
                 )
             except Exception as exc:
@@ -1375,6 +1389,9 @@ async def run_real_scan_capture_queue(
                     "raw_image": capture.get("raw_image"),
                     "detection_platform": detection_platform,
                     "inference_location": detection_platform,
+                    "executed_platform": detection_platform,
+                    "experiment_profile": experiment_profile,
+                    "simulated_delay_ms": 0,
                 }
 
             queue_stats["completed"] = int(queue_stats["completed"]) + 1
@@ -1394,6 +1411,9 @@ async def run_real_scan_capture_queue(
                         "error": result.get("error"),
                         "message": result.get("message"),
                         "detection_platform": detection_platform,
+                        "executed_platform": detection_platform,
+                        "experiment_profile": experiment_profile,
+                        "simulated_delay_ms": 0,
                     },
                 )
                 await emit(
@@ -1422,6 +1442,11 @@ async def run_real_scan_capture_queue(
             result["capture_ms"] = capture.get("capture_ms")
             result["source_image"] = capture.get("source_image")
             result["simulation_crop"] = capture.get("simulation_crop")
+            result["experiment_profile"] = experiment_profile
+            result["executed_platform"] = detection_platform
+            result["detection_platform"] = detection_platform
+            result["inference_location"] = detection_platform
+            result["simulated_delay_ms"] = 0
 
             update_manifest_cell(
                 row,
@@ -1438,6 +1463,9 @@ async def run_real_scan_capture_queue(
                     "inference_ms": result.get("inference_ms"),
                     "inference_location": result.get("inference_location"),
                     "detection_platform": result.get("detection_platform"),
+                    "executed_platform": result.get("executed_platform"),
+                    "experiment_profile": result.get("experiment_profile"),
+                    "simulated_delay_ms": result.get("simulated_delay_ms"),
                     "platform_priority": result.get("platform_priority"),
                     "fallback_reason": result.get("fallback_reason"),
                     "cloud_fallback_reason": result.get("cloud_fallback_reason"),
@@ -1465,6 +1493,9 @@ async def run_real_scan_capture_queue(
                     "inference_ms": result.get("inference_ms"),
                     "inference_location": result.get("inference_location"),
                     "detection_platform": result.get("detection_platform"),
+                    "executed_platform": result.get("executed_platform"),
+                    "experiment_profile": result.get("experiment_profile"),
+                    "simulated_delay_ms": result.get("simulated_delay_ms"),
                     "platform_priority": result.get("platform_priority"),
                     "fallback_reason": result.get("fallback_reason"),
                     "cloud_fallback_reason": result.get("cloud_fallback_reason"),
@@ -1784,6 +1815,9 @@ async def run_real_scan_capture_queue(
             mosaic_payload["inference_ms"] = 0
             mosaic_payload["inference_location"] = "skipped"
             mosaic_payload["detection_platform"] = detection_platform
+            mosaic_payload["executed_platform"] = detection_platform
+            mosaic_payload["experiment_profile"] = experiment_profile
+            mosaic_payload["simulated_delay_ms"] = 0
             mosaic_payload["mosaic_detection_skipped"] = True
             mosaic_payload["skip_reason"] = "real_mode_traceable_cell_fusion"
             await emit(
@@ -1805,6 +1839,7 @@ async def run_real_scan_capture_queue(
                     "scan_id": scan_id,
                     "phase": "mosaic_detecting",
                     "detection_platform": detection_platform,
+                    "experiment_profile": experiment_profile,
                 },
             )
             if mosaic_detection.get("ok"):
@@ -1814,6 +1849,9 @@ async def run_real_scan_capture_queue(
                 mosaic_payload["inference_ms"] = mosaic_detection.get("inference_ms")
                 mosaic_payload["inference_location"] = mosaic_detection.get("inference_location")
                 mosaic_payload["detection_platform"] = mosaic_detection.get("detection_platform")
+                mosaic_payload["executed_platform"] = detection_platform
+                mosaic_payload["experiment_profile"] = experiment_profile
+                mosaic_payload["simulated_delay_ms"] = 0
                 mosaic_payload["platform_priority"] = mosaic_detection.get("platform_priority")
                 mosaic_payload["fallback_reason"] = mosaic_detection.get("fallback_reason")
                 mosaic_payload["cloud_fallback_reason"] = mosaic_detection.get("cloud_fallback_reason")
@@ -1854,6 +1892,9 @@ async def run_real_scan_capture_queue(
             "origin_mm": {"x": origin_x_mm, "y": origin_y_mm},
             "operation_mode": "real",
             "detection_platform": detection_platform,
+            "executed_platform": detection_platform,
+            "experiment_profile": experiment_profile,
+            "simulated_delay_ms": 0,
             "return_motion": "physical",
             "mosaic": mosaic_payload,
             "queue": queue_payload(),
@@ -1871,12 +1912,20 @@ async def run_scan(
     operation_mode: str,
     detection_platform: str,
     stop_event: asyncio.Event,
+    experiment_profile: str = DEFAULT_EXPERIMENT_PROFILE,
 ) -> None:
     if operation_mode == "real" and capture_mode != "mock":
         global active_real_scan_control
         active_real_scan_control = RealScanRuntimeControl(plan.get("motion_speed_mm_s"))
         try:
-            await run_real_scan_capture_queue(websocket, scan_id, plan, detection_platform, stop_event)
+            await run_real_scan_capture_queue(
+                websocket,
+                scan_id,
+                plan,
+                "huawei_cloud",
+                stop_event,
+                experiment_profile,
+            )
         finally:
             active_real_scan_control = None
         return
@@ -2903,8 +2952,8 @@ async def api_phone_batch_detect(batch_id: str, request: Request) -> dict[str, A
     detection_profile = str(payload.get("detection_profile") or payload.get("profile") or "precision").strip()
     try:
         experiment_profile = normalize_phone_experiment_profile(
-            payload.get("phone_experiment_profile"),
-            payload.get("detection_platform") or "huawei_cloud",
+            payload.get("phone_experiment_profile") or payload.get("experiment_profile"),
+            payload.get("detection_platform"),
         )
         return start_phone_batch_detection(batch_id, detection_profile, experiment_profile)
     except camera_trigger.CameraTriggerError as exc:
@@ -2977,26 +3026,26 @@ async def api_phone_detect(request: Request) -> dict[str, Any]:
     if operation_mode not in {"phone", "real_browser_camera"}:
         raise HTTPException(status_code=400, detail="operation_mode must be phone or real_browser_camera.")
     try:
-        detection_platform = normalize_detection_platform(payload.get("detection_platform"))
         experiment_profile = normalize_phone_experiment_profile(
-            payload.get("phone_experiment_profile"),
-            detection_platform,
+            payload.get("phone_experiment_profile") or payload.get("experiment_profile"),
+            payload.get("detection_platform"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         async with phone_detection_lock:
             if operation_mode == "real_browser_camera":
-                return await detect_phone_upload_selected_platform(
+                return await detect_phone_upload_cloud_experiment(
                     upload_id,
                     detection_profile,
-                    detection_platform,
-                    operation_mode,
+                    experiment_profile,
+                    operation_mode=operation_mode,
+                    apply_simulated_delay=False,
                 )
             return await detect_phone_upload_phone_first(
                 upload_id,
                 detection_profile,
-                detection_platform,
+                "huawei_cloud",
                 experiment_profile,
             )
     except camera_trigger.CameraTriggerError as exc:
@@ -3294,10 +3343,9 @@ async def websocket_control(websocket: WebSocket) -> None:
                     continue
                 detection_profile = str(payload.get("detection_profile") or payload.get("profile") or "precision").strip()
                 try:
-                    detection_platform = normalize_detection_platform(payload.get("detection_platform"))
                     experiment_profile = normalize_phone_experiment_profile(
-                        payload.get("phone_experiment_profile"),
-                        detection_platform,
+                        payload.get("phone_experiment_profile") or payload.get("experiment_profile"),
+                        payload.get("detection_platform"),
                     )
                 except ValueError as exc:
                     await send_packet(websocket, "phone_error", {"request_id": request_id, "message": str(exc)})
@@ -3317,7 +3365,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                                 upload_id,
                                 stop_event,
                                 detection_profile,
-                                detection_platform,
+                                "huawei_cloud",
                                 experiment_profile,
                             )
                         finally:
@@ -3376,7 +3424,18 @@ async def websocket_control(websocket: WebSocket) -> None:
                         plan["settle_seconds"] = normalize_settle_seconds(
                             payload.get("settle_seconds", plan.get("settle_seconds"))
                         )
-                    detection_platform = normalize_detection_platform(payload.get("detection_platform"))
+                    if operation_mode == "real":
+                        experiment_profile = normalize_phone_experiment_profile(
+                            payload.get("experiment_profile") or payload.get("phone_experiment_profile"),
+                            payload.get("detection_platform"),
+                        )
+                        detection_platform = "huawei_cloud"
+                    else:
+                        detection_platform = normalize_detection_platform(payload.get("detection_platform"))
+                        experiment_profile = normalize_phone_experiment_profile(
+                            payload.get("experiment_profile") or payload.get("phone_experiment_profile"),
+                            detection_platform,
+                        )
                 except (KeyError, TypeError, ValueError) as exc:
                     await send_packet(websocket, "scan_error", {"request_id": request_id, "message": str(exc)})
                     continue
@@ -3399,6 +3458,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                                 operation_mode,
                                 detection_platform,
                                 stop_event,
+                                experiment_profile,
                             )
                         finally:
                             active_stop_event = None
@@ -3412,6 +3472,9 @@ async def websocket_control(websocket: WebSocket) -> None:
                         "scan_id": scan_id,
                         "operation_mode": operation_mode,
                         "detection_platform": detection_platform,
+                        "executed_platform": detection_platform,
+                        "experiment_profile": experiment_profile,
+                        "simulated_delay_ms": 0 if operation_mode == "real" else None,
                         "message": "start_scan accepted.",
                     },
                 )

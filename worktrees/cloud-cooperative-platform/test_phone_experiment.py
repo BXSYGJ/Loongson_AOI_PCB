@@ -12,18 +12,30 @@ import main
 
 
 class PhoneExperimentTests(unittest.TestCase):
-    def test_board_parameters_only_show_in_simulation_and_frontends_default_precision(self):
+    def test_product_frontends_hide_simulation_and_default_to_local_experiment_profile(self):
         html = (main.STATIC_DIR / "index.html").read_text(encoding="utf-8")
         script = (main.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        phone_html = (main.STATIC_DIR / "phone.html").read_text(encoding="utf-8")
         mini_script = (main.STATIC_DIR.parent / "miniprogram" / "pages" / "index" / "index.js").read_text(encoding="utf-8")
+        mini_wxml = (main.STATIC_DIR.parent / "miniprogram" / "pages" / "index" / "index.wxml").read_text(encoding="utf-8")
 
-        self.assertIn('id="boardParametersPanel"', html)
-        self.assertIn('data-visible-mode="simulation"', html)
+        self.assertNotIn('data-mode="simulation"', html)
+        self.assertNotIn('id="simulationPanel"', html)
+        self.assertNotIn('id="boardParametersPanel"', html)
+        self.assertLess(html.index('value="local_link_sim" checked'), html.index('value="phone_link_sim"'))
+        self.assertLess(html.index('value="phone_link_sim"'), html.index('value="cloud_baseline"'))
+        self.assertLess(phone_html.index('value="local_link_sim"'), phone_html.index('value="phone_link_sim"'))
+        self.assertLess(phone_html.index('value="phone_link_sim"'), phone_html.index('value="cloud_baseline"'))
         self.assertRegex(html, r'name="phoneDetectionProfile" value="precision" checked')
         self.assertNotRegex(html, r'name="phoneDetectionProfile" value="fast" checked')
-        self.assertIn('boardParametersPanel.classList.toggle("is-hidden", state.mode !== "simulation")', script)
         self.assertIn('phoneDetectionProfile: "precision"', script)
+        self.assertIn('detectionPlatform: "local_link_sim"', script)
         self.assertIn('state.phoneDetectionProfile || "precision"', script)
+        self.assertNotIn('key: "simulation"', mini_script)
+        self.assertNotIn("activeMode === 'simulation'", mini_wxml)
+        self.assertLess(mini_script.index('key: "local_link_sim"'), mini_script.index('key: "phone_link_sim"'))
+        self.assertLess(mini_script.index('key: "phone_link_sim"'), mini_script.index('key: "cloud_baseline"'))
+        self.assertIn('detectionPlatform: "local_link_sim"', mini_script)
         self.assertIn('profile: "precision"', mini_script)
         self.assertIn('profileText: "高精模式"', mini_script)
 
@@ -46,7 +58,7 @@ class PhoneExperimentTests(unittest.TestCase):
         with patch.object(main, "start_phone_batch_detection", return_value={"status": "queued"}) as start_batch:
             result = asyncio.run(main.api_phone_batch_detect("batch-1", FakeRequest({})))
         self.assertEqual(result["status"], "queued")
-        start_batch.assert_called_once_with("batch-1", "precision", "cloud_baseline")
+        start_batch.assert_called_once_with("batch-1", "precision", "local_link_sim")
 
         async def fake_detect(_upload_id, detection_profile, _platform, _experiment):
             return {"detection_profile": detection_profile}
@@ -133,7 +145,7 @@ class PhoneExperimentTests(unittest.TestCase):
         self.assertGreaterEqual(result["total_elapsed_ms"], 2750.0)
         sleep_mock.assert_awaited_once_with(2.75)
 
-    def test_non_phone_upload_detection_preserves_selected_platform(self):
+    def test_real_browser_camera_profiles_always_use_cloud_without_simulated_delay(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             raw_path = Path(temp_dir) / "raw.jpg"
             raw_path.write_bytes(b"raw")
@@ -151,25 +163,36 @@ class PhoneExperimentTests(unittest.TestCase):
                     "detection_platform": metadata["detection_platform"],
                 }
 
-            with (
-                patch.object(camera_trigger, "phone_detection_profile_config", return_value={"profile": "fast", "label": "快速模式"}),
-                patch.object(camera_trigger, "get_phone_upload", return_value={"upload_id": "upload-1", "raw_image": "raw.jpg"}),
-                patch.object(camera_trigger, "resolve_artifact", return_value=raw_path),
-                patch.object(camera_trigger, "store_phone_detection_result", side_effect=lambda _upload_id, result, _profile, _label: result),
-                patch.object(main, "detect_artifact_platform_first", side_effect=fake_detect),
+            for requested, expected_profile in (
+                ("local_dnn", "local_link_sim"),
+                ("phone_browser", "phone_link_sim"),
+                ("huawei_cloud", "cloud_baseline"),
             ):
-                result = asyncio.run(
-                    main.detect_phone_upload_selected_platform(
-                        "upload-1",
-                        "fast",
-                        "local_dnn",
-                        "real_browser_camera",
+                seen_metadata.clear()
+                with (
+                    patch.object(camera_trigger, "phone_detection_profile_config", return_value={"profile": "fast", "label": "快速模式"}),
+                    patch.object(camera_trigger, "get_phone_upload", return_value={"upload_id": "upload-1", "raw_image": "raw.jpg"}),
+                    patch.object(camera_trigger, "resolve_artifact", return_value=raw_path),
+                    patch.object(camera_trigger, "store_phone_detection_result", side_effect=lambda _upload_id, result, _profile, _label: result),
+                    patch.object(main, "detect_artifact_platform_first", side_effect=fake_detect),
+                    patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep_mock,
+                ):
+                    result = asyncio.run(
+                        main.detect_phone_upload_selected_platform(
+                            "upload-1",
+                            "fast",
+                            requested,
+                            "real_browser_camera",
+                        )
                     )
-                )
-
-        self.assertEqual(seen_metadata["operation_mode"], "real_browser_camera")
-        self.assertEqual(seen_metadata["detection_platform"], "local_dnn")
-        self.assertEqual(result["detection_platform"], "local_dnn")
+                self.assertEqual(seen_metadata["operation_mode"], "real_browser_camera")
+                self.assertEqual(seen_metadata["detection_platform"], "huawei_cloud")
+                self.assertEqual(seen_metadata["experiment_profile"], expected_profile)
+                self.assertEqual(result["experiment_profile"], expected_profile)
+                self.assertEqual(result["executed_platform"], "huawei_cloud")
+                self.assertEqual(result["detection_platform"], "huawei_cloud")
+                self.assertEqual(result["simulated_delay_ms"], 0.0)
+                sleep_mock.assert_not_awaited()
 
     def test_phone_annotated_download_returns_attachment(self):
         with tempfile.TemporaryDirectory() as temp_dir:

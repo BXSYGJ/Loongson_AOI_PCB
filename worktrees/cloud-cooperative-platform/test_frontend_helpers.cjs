@@ -57,6 +57,10 @@ assert.equal(helpers.resolveDefectSourceCell({ cell: "mosaic", bbox: [1, 2, 3, 4
 assert.equal(helpers.phoneExperimentProfileFromPlatform("huawei_cloud"), "cloud_baseline");
 assert.equal(helpers.phoneExperimentProfileFromPlatform("phone_browser"), "phone_link_sim");
 assert.equal(helpers.phoneExperimentProfileFromPlatform("local_dnn"), "local_link_sim");
+assert.equal(helpers.phoneExperimentProfileFromPlatform("cloud_baseline"), "cloud_baseline");
+assert.equal(helpers.phoneExperimentProfileFromPlatform("phone_link_sim"), "phone_link_sim");
+assert.equal(helpers.phoneExperimentProfileFromPlatform("local_link_sim"), "local_link_sim");
+assert.equal(helpers.phoneExperimentProfileFromPlatform(), "local_link_sim");
 
 assert.deepEqual(
   helpers.phoneViewportRect(

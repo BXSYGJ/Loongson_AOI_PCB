@@ -359,14 +359,11 @@
     <header>
       <div class="brand">Loongson AOI</div>
       <h1>手机拍照上传</h1>
-      <p>拍照或选择 PCB 图片后上传到电脑/龙芯教育派。检测由电脑端第五模块人工选择后启动。</p>
+      <p>拍照或选择 PCB 图片后上传。三个实验档位的实际推理均由华为云执行。</p>
     </header>
 
     <section class="panel">
-      <div class="worker">
-        <strong>手机推理节点</strong>
-        <span id="workerStatus">正在连接推理通道...</span>
-      </div>
+      <div class="worker"><strong>实际执行</strong><span>华为云</span></div>
       <div class="picker-actions">
         <button class="picker-btn" id="takePhotoBtn" type="button">拍照</button>
         <button class="picker-btn secondary" id="chooseGalleryBtn" type="button">从图库选择</button>
@@ -397,9 +394,9 @@
           <option value="precision">高精模式</option>
         </select>
         <select id="experimentSelect" aria-label="检测实验档位">
-          <option value="cloud_baseline">华为云</option>
+          <option value="local_link_sim">本地（龙芯）</option>
           <option value="phone_link_sim">手机</option>
-          <option value="local_link_sim">网站后端服务器</option>
+          <option value="cloud_baseline">华为云</option>
         </select>
       </div>
       <div id="batchResults" class="batch-results">
@@ -417,7 +414,6 @@
     <a class="nav" href="/">返回完整 AOI 网站</a>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script>
     const cameraInput = document.getElementById("cameraInput");
     const galleryInput = document.getElementById("galleryInput");
@@ -452,7 +448,7 @@
     }
 
     function setWorkerStatus(text) {
-      workerStatus.textContent = text;
+      if (workerStatus) workerStatus.textContent = text;
     }
 
     function formatBytes(bytes) {
@@ -1067,7 +1063,6 @@
     });
 
     refreshCurrentBatch();
-    connectInferenceWorker();
   </script>
 </body>
 </html>

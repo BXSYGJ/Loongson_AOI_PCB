@@ -2,13 +2,6 @@ const app = getApp();
 
 const MODES = [
   {
-    key: "simulation",
-    name: "模拟模式",
-    tag: "图片 + 拼接",
-    desc: "导入已有 PCB 图片，交给网站模拟滑台检测流程。",
-    hint: "小程序可把图片导入网站队列；完整网格扫描、拼图和复核建议在完整网站继续操作。"
-  },
-  {
     key: "real",
     name: "真实模式",
     tag: "滑台 + 相机",
@@ -19,15 +12,15 @@ const MODES = [
     key: "phone",
     name: "手机拍照",
     tag: "拍照上传",
-    desc: "拍照或从图库选择 PCB，上传到网站并按所选平台检测。",
+    desc: "拍照或从图库选择 PCB，上传到网站并按所选实验档位检测。",
     hint: "与手机浏览器 /phone 和完整网站手机拍照模块共享上传队列、检测结果和 LLM 报告。"
   }
 ];
 
 const PLATFORMS = [
-  { key: "huawei_cloud", name: "华为云", desc: "ECS + OBS + OpenCV DNN" },
-  { key: "phone_browser", name: "手机", desc: "需要浏览器 /phone worker 在线" },
-  { key: "local_dnn", name: "本地电脑/龙芯", desc: "运行网站后端的设备本地推理" }
+  { key: "local_link_sim", name: "本地（龙芯）", desc: "实验档位；实际执行：华为云" },
+  { key: "phone_link_sim", name: "手机", desc: "实验档位；实际执行：华为云" },
+  { key: "cloud_baseline", name: "华为云", desc: "基准档位；实际执行：华为云" }
 ];
 
 const LLM_MODELS = [
@@ -64,7 +57,7 @@ function formatConfidence(value) {
 }
 
 function modeByKey(key) {
-  return MODES.find((item) => item.key === key) || MODES[2];
+  return MODES.find((item) => item.key === key) || MODES[1];
 }
 
 function platformByKey(key) {
@@ -159,8 +152,8 @@ Page({
     platforms: PLATFORMS,
     activeMode: "phone",
     activeModeMeta: modeByKey("phone"),
-    detectionPlatform: "huawei_cloud",
-    detectionPlatformMeta: platformByKey("huawei_cloud"),
+    detectionPlatform: "local_link_sim",
+    detectionPlatformMeta: platformByKey("local_link_sim"),
     profile: "precision",
     profileText: "高精模式",
     consoleBase: baseUrlFromApp(),
@@ -278,9 +271,9 @@ Page({
   },
 
   choosePlatform(event) {
-    const key = event.currentTarget.dataset.platform || "huawei_cloud";
+    const key = event.currentTarget.dataset.platform || "local_link_sim";
     this.setData({ detectionPlatform: key, detectionPlatformMeta: platformByKey(key) });
-    this.log(`检测平台：${platformByKey(key).name}`);
+    this.log(`检测实验档位：${platformByKey(key).name}，实际执行：华为云`);
   },
 
   onProfileChange(event) {
@@ -508,7 +501,8 @@ Page({
         method: "POST",
         data: {
           detection_profile: this.data.profile,
-          detection_platform: this.data.detectionPlatform
+          detection_platform: "huawei_cloud",
+          phone_experiment_profile: this.data.detectionPlatform
         }
       });
       this.setStatus("本次照片已进入顺序检测");
@@ -557,7 +551,8 @@ Page({
         data: {
           upload_id: uploadId,
           detection_profile: this.data.profile,
-          detection_platform: this.data.detectionPlatform
+          detection_platform: "huawei_cloud",
+          phone_experiment_profile: this.data.detectionPlatform
         },
         timeout: 120000
       });
@@ -670,13 +665,14 @@ Page({
       detectionSourceText: platformByKey(this.data.detectionPlatform).name
     });
     try {
-      this.setStatus(`正在调用${platformByKey(this.data.detectionPlatform).name}检测`);
+      this.setStatus(`正在运行${platformByKey(this.data.detectionPlatform).name}档位，实际执行：华为云`);
       const result = await requestJson(`${this.apiBase()}/api/phone/detect`, {
         method: "POST",
         data: {
           upload_id: this.data.selectedUploadId,
           detection_profile: this.data.profile,
-          detection_platform: this.data.detectionPlatform
+          detection_platform: "huawei_cloud",
+          phone_experiment_profile: this.data.detectionPlatform
         },
         timeout: 120000
       });
@@ -700,7 +696,7 @@ Page({
       confidence: item.confidence,
       confidenceText: formatConfidence(item.confidence)
     }));
-    const source = payload.detection_platform || payload.inference_location || this.data.detectionPlatform;
+    const selectedProfile = payload.experiment_profile || this.data.detectionPlatform;
     this.setData({
       rawUrl: absoluteUrl(this.apiBase(), payload.raw_image || payload.latest_image || payload.image_path || ""),
       annotatedUrl: absoluteUrl(this.apiBase(), payload.annotated_image || ""),
@@ -708,7 +704,7 @@ Page({
       defects,
       defectCount: defects.length,
       inferenceMs: payload.inference_ms || "-",
-      detectionSourceText: platformByKey(source).name || source,
+      detectionSourceText: `${platformByKey(selectedProfile).name}档位 · 实际华为云`,
       statusText: keepStatus ? this.data.statusText : `检测完成：${defects.length} 个缺陷`
     });
   },

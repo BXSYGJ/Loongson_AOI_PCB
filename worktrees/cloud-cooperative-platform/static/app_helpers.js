@@ -61,7 +61,7 @@
   }
 
   function phoneExperimentProfileFromPlatform(platform) {
-    const value = String(platform || "huawei_cloud").trim().toLowerCase();
+    const value = String(platform || "local_link_sim").trim().toLowerCase();
     if (value === "phone_browser" || value === "phone_link_sim") return "phone_link_sim";
     if (value === "local_dnn" || value === "local_link_sim") return "local_link_sim";
     return "cloud_baseline";

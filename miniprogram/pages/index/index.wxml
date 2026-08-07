@@ -3,7 +3,7 @@
     <view>
       <text class="brand">Loongson AOI</text>
       <text class="title">单板 PCB 智能缺陷检测系统</text>
-      <text class="subtitle">与手机版网页和完整网站共用同一后端、同一检测平台路由和同一结果格式。</text>
+      <text class="subtitle">与手机版网页和完整网站共用同一后端；三个实验档位均由华为云执行。</text>
     </view>
     <view class="endpoint-card">
       <view class="endpoint-row">
@@ -48,7 +48,7 @@
     </view>
 
     <view class="platform-switch">
-      <text class="switch-label">检测平台</text>
+      <text class="switch-label">检测实验档位</text>
       <block wx:for="{{platforms}}" wx:key="key">
         <view class="platform-item {{detectionPlatform === item.key ? 'active' : ''}}" data-platform="{{item.key}}" bindtap="choosePlatform">
           <text class="platform-name">{{item.name}}</text>
@@ -100,11 +100,6 @@
     <view wx:if="{{activeMode === 'phone'}}">
       <button class="primary" disabled="{{!selectedFiles.length || busy}}" bindtap="uploadSelectedToPhoneQueue">
         {{busy ? "处理中..." : "上传本次照片（最多9张）"}}
-      </button>
-    </view>
-    <view wx:if="{{activeMode === 'simulation'}}">
-      <button class="primary" disabled="{{!imagePath || busy}}" bindtap="uploadSimulationImage">
-        {{busy ? "导入中..." : "导入模拟图片"}}
       </button>
     </view>
     <view wx:if="{{activeMode === 'real'}}" class="real-hint">

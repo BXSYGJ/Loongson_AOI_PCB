@@ -103,6 +103,7 @@ class ScanMosaicTests(unittest.TestCase):
         plan["motion_speed_mm_s"] = 7.5
         plan["settle_seconds"] = 0.0
         events: list[str] = []
+        detection_metadata: list[dict] = []
 
         class FakeWebSocket:
             def __init__(self):
@@ -126,6 +127,7 @@ class ScanMosaicTests(unittest.TestCase):
 
         async def fake_detect(raw_image, annotated_path, result_json_path, metadata):
             events.append(f"detect:{metadata['row']}:{metadata['col']}")
+            detection_metadata.append(dict(metadata))
             return {
                 "ok": True,
                 "defects": [],
@@ -194,6 +196,7 @@ class ScanMosaicTests(unittest.TestCase):
                     "real",
                     "local_dnn",
                     asyncio.Event(),
+                    "local_link_sim",
                 )
             )
 
@@ -212,6 +215,14 @@ class ScanMosaicTests(unittest.TestCase):
             motion_packets = [packet for packet in websocket.packets if packet.get("type") == "motion_complete"]
             self.assertTrue(motion_packets)
             self.assertEqual(motion_packets[0]["payload"]["motion_telemetry"]["emitted_pulses"]["x"], 750)
+            self.assertEqual(len(detection_metadata), 16)
+            self.assertTrue(all(item["detection_platform"] == "huawei_cloud" for item in detection_metadata))
+            self.assertTrue(all(item["experiment_profile"] == "local_link_sim" for item in detection_metadata))
+            grid_payload = next(packet["payload"] for packet in websocket.packets if packet.get("type") == "grid_plan")
+            self.assertEqual(grid_payload["detection_platform"], "huawei_cloud")
+            self.assertEqual(grid_payload["executed_platform"], "huawei_cloud")
+            self.assertEqual(grid_payload["experiment_profile"], "local_link_sim")
+            self.assertEqual(grid_payload["simulated_delay_ms"], 0)
         finally:
             camera_trigger.capture_frame = original_capture
             main.detect_artifact_phone_first = original_detect

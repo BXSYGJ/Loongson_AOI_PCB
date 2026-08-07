@@ -4,21 +4,23 @@ This branch contains the current cloud-cooperative web console for the PCB AOI
 workflow. It is the main branch to run on Windows, Huawei Cloud ECS, or the
 Loongson Education board when coordinating the complete AOI demo.
 
-The runtime now separates **operation mode** from **detection platform**:
+The product UI separates **operation mode** from an **experiment profile**:
 
 ```text
-Operation mode: simulation | real | phone
-Detection platform: Huawei Cloud | phone/browser worker | local OpenCV DNN
+Operation mode: real | phone
+Experiment profile: local_link_sim | phone_link_sim | cloud_baseline
+Executed platform: Huawei Cloud
 ```
 
-The user explicitly selects the detection platform at the top of each mode.
-Detection failures do not silently switch to another platform; the UI reports
-the failure and the user can select a different platform.
+The profile order is always Local (Loongson), Phone, Huawei Cloud, with Local
+selected by default. All three profiles execute inference on Huawei Cloud. The
+phone workflow keeps the configured link-delay experiment; real mode adds no
+simulated delay.
 
 The Loongson Education board is responsible for real-mode slide-table movement
-and OV9281 capture. Defect inference is handled by the platform selected in the
-UI: Huawei Cloud, a same-LAN phone/browser worker, or local OpenCV DNN on the
-machine running the website.
+and OV9281 capture. Product inference is handled by Huawei Cloud. The lower-level
+phone/browser worker and local OpenCV DNN routes remain available for diagnostics
+and legacy API compatibility, but are not selected by the product UI.
 
 The branch connects:
 
@@ -28,12 +30,11 @@ The branch connects:
 - local OpenCV DNN detection platform
 - XYZ slide-table scan orchestration
 - WebSocket event updates for the browser UI
-- simulation, real fixed-point scan, and phone-upload workflows
+- real fixed-point scan and phone-upload product workflows
 
 The current UI is designed as a white industrial control panel. It is the branch
 to run when you want the local website to coordinate camera/slide-table control
-and explicitly choose whether detection runs on Huawei Cloud, a phone/browser
-worker, or the local backend host.
+and compare three experiment profiles while keeping actual inference on Huawei Cloud.
 
 ## Main Files
 
@@ -208,18 +209,15 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8020
 }
 ```
 
-Huawei Cloud results are written back into the same local output layout as local
-detection. This keeps the UI, manifest, mosaic, and artifact viewer compatible
-with simulation, real, and phone workflows.
+Huawei Cloud results are written back into the same output layout. This keeps
+the UI, manifest, mosaic, and artifact viewer compatible with real and phone
+workflows. Internal simulation helpers remain available for tests.
 
-## Loongson 2K1000LA Simulation-First Deployment
+## Loongson 2K1000LA Deployment
 
-For the first board-side validation stage, use simulation mode before phone
-photo, camera, or slide-table control. Import a known PCB image, set the PCB
-size to `30mm x 30mm`, and run a single-cell scan so the board only performs
-one ONNX inference after mosaic restoration. This is the safest path for
-proving the website, OpenCV DNN runtime, event stream, and output images on the
-2K1000LA.
+Use the formal three-platform release package. Validate the website in motor
+dry-run first, then enable the physical slide table only after checking origin,
+wiring, travel limits, camera focus, and emergency-stop conditions.
 
 The deployment guide and scripts are in:
 
@@ -228,21 +226,15 @@ LOONGSON_2K1000LA_PHONE_DEPLOY.md
 deploy/loongson/
 ```
 
-From Windows PowerShell, build the transfer bundle with:
+From Windows PowerShell, build the formal release packages with:
 
 ```powershell
-.\deploy\loongson\make_loongson_phone_bundle.ps1
+pwsh -File .\tools\build_packages.ps1
 ```
 
-Copy `dist\loongson_phone_bundle.zip` to `~/Documents` on the board, unzip it,
-then run:
-
-```sh
-cd ~/Documents/Loongson_AOI_PCB/worktrees/cloud-cooperative-platform
-sh deploy/loongson/install_phone_deps.sh
-sh deploy/loongson/check_phone_runtime.sh
-sh deploy/loongson/run_phone_server.sh
-```
+Use `packages/Loongson_AOI_PCB_loongson_2k1000la.zip`. Do not use the legacy
+`dist/loongson_phone_bundle.zip`. After extracting the formal package, follow
+`docs/DEPLOY_LOONGSON.md` or `deploy/loongson/MANUAL_DEPLOY.md`.
 
 The Loongson script enables board-safe defaults:
 
@@ -257,33 +249,23 @@ It also starts Uvicorn through `nice -n 10` by default so ONNX inference has a
 lower chance of starving the SSH/FinalShell session. The board script defaults
 to port `8000`; set `AOI_PORT=8020` before running it if you want the same port
 as the ECS/Windows demo. After opening `http://<board-ip>:8000/` or
-`http://<board-ip>:8020/`, enter simulation mode, import a `640x640` image or a
-PCB image with long side no larger than `960`, set PCB length/width to
-`30mm x 30mm`, then start detection.
+`http://<board-ip>:8020/`, the product UI offers real mode and phone-photo mode.
+Both default to the Local (Loongson) experiment profile, while actual inference
+is sent to Huawei Cloud.
 
-## Phone Browser Inference Worker
+## Phone Photo Workflow
 
-The phone module remains useful in two ways:
-
-- as the phone-photo mode for taking or selecting PCB photos;
-- as a same-LAN browser inference worker when `phone_browser` is selected as the
-  detection platform.
+The phone module takes or selects PCB photos and uploads them for Huawei Cloud
+inference. Its Local, Phone, and Huawei Cloud choices are experiment profiles,
+not actual inference routes.
 
 The phone can either open the complete UI or the minimal `/phone` page. The
 phone page has separate buttons for camera capture and gallery selection.
 
-When `/phone` loads `best.onnx` successfully, it can act as the inference worker
-for simulation, real, and phone-photo detections. The desktop status panel shows
-whether a real worker is connected. A hidden worker is not started
-automatically; a phone or desktop browser must explicitly open the worker page.
-
-If Huawei Cloud is unavailable and no phone worker is online, the website
-reports the selected platform as unavailable. Select `本地电脑/龙芯` to run local
-OpenCV DNN inference.
-
-On the 2K1000LA, use phone detection only after simulation mode is stable.
-Large phone photos can still be much heavier than the simulation single-cell
-path because tiled detection may require multiple ONNX forwards.
+The product UI does not start or wait for the legacy phone inference worker.
+If Huawei Cloud is unavailable, preflight blocks all three experiment profiles.
+Local DNN and phone-worker capabilities remain available only for diagnostics
+and compatible legacy callers.
 
 Phone uploads are normalized before inference:
 

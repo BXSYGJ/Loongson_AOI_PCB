@@ -67,14 +67,14 @@ const state = {
   selectedPhoneUploadId: "",
   selectedPhoneUploadIds: new Set(),
   phoneDetectionProfile: "precision",
-  phoneExperimentProfile: "cloud_baseline",
+  phoneExperimentProfile: "local_link_sim",
   phoneDetectionStartedAt: 0,
   phoneElapsedMs: null,
   phoneViewport: { scale: 1, offsetX: 0, offsetY: 0 },
   phoneViewportBaseRect: null,
   phonePointer: null,
   suppressCanvasClick: false,
-  detectionPlatform: "huawei_cloud",
+  detectionPlatform: "local_link_sim",
   detectionPlatformsStatus: null,
   detectionQueue: { pending: 0, captured: 0, completed: 0, total: 0, errors: 0 },
   cameraInputMode: "backend",
@@ -354,22 +354,8 @@ function setWsOnline(online) {
 function currentModeRequirementsReady(status = state.lastStatus) {
   if (!status || !state.mode) return false;
   const platforms = status.detection_platforms || {};
-  const algorithm = status.algorithm || {};
-  const platform = state.mode === "phone" ? "huawei_cloud" : state.detectionPlatform;
-  let platformReady = false;
-
-  if (platform === "huawei_cloud") {
-    const cloud = platforms.huawei_cloud || status.cloud_detection || {};
-    platformReady = Boolean(cloud.enabled && cloud.configured);
-  } else if (platform === "phone_browser") {
-    const phone = platforms.phone_browser || status.phone_inference || {};
-    const weights = algorithm.weights || {};
-    const config = algorithm.config || {};
-    platformReady = Boolean(phone.ready && weights.exists && config.exists);
-  } else if (platform === "local_dnn") {
-    const localDnn = platforms.local_dnn || {};
-    platformReady = Boolean(localDnn.model_exists && !localDnn.last_error);
-  }
+  const cloud = platforms.huawei_cloud || status.cloud_detection || {};
+  const platformReady = Boolean(cloud.enabled && cloud.configured);
 
   if (state.mode !== "real") return platformReady;
   const motor = status.motor || {};
@@ -482,8 +468,8 @@ function chooseMode(mode) {
   if (!MODE_META[mode]) return;
   setWorkspaceView("balanced", { redraw: false });
   state.mode = mode;
-  state.detectionPlatform = "huawei_cloud";
-  state.phoneExperimentProfile = "cloud_baseline";
+  state.detectionPlatform = "local_link_sim";
+  state.phoneExperimentProfile = "local_link_sim";
   state.phoneElapsedMs = null;
   resetPhoneViewport(false);
   syncDetectionPlatformUi();
@@ -508,7 +494,7 @@ function returnToModeScreen() {
 }
 
 function updateModeUi() {
-  const meta = MODE_META[state.mode] || MODE_META.simulation;
+  const meta = MODE_META[state.mode] || MODE_META.real;
   el.activeModeBadge.textContent = meta.label;
   el.modeDescription.textContent = meta.description;
   el.previewTitle.textContent = meta.previewTitle;
@@ -518,8 +504,8 @@ function updateModeUi() {
   Array.prototype.forEach.call(el.modeCards, (card) => {
     card.classList.toggle("selected", card.dataset.mode === state.mode);
   });
-  el.simulationPanel.classList.toggle("is-hidden", state.mode !== "simulation");
-  el.boardParametersPanel.classList.toggle("is-hidden", state.mode !== "simulation");
+  if (el.simulationPanel) el.simulationPanel.classList.toggle("is-hidden", true);
+  if (el.boardParametersPanel) el.boardParametersPanel.classList.toggle("is-hidden", true);
   if (el.cameraSourcePanel) {
     el.cameraSourcePanel.classList.toggle("is-hidden", state.mode !== "real");
   }
@@ -533,12 +519,12 @@ function updateModeUi() {
   const videoMode = false;
   const handheldMode = false;
   const phoneMode = state.mode === "phone";
-  if (el.platformSwitchTitle) el.platformSwitchTitle.textContent = phoneMode ? "检测实验档位" : "检测平台";
+  if (el.platformSwitchTitle) el.platformSwitchTitle.textContent = "检测实验档位";
   const realMode = state.mode === "real";
-  el.pcbLength.disabled = videoMode || handheldMode || phoneMode || realMode;
-  el.pcbWidth.disabled = videoMode || handheldMode || phoneMode || realMode;
-  el.originX.disabled = videoMode || handheldMode || phoneMode;
-  el.originY.disabled = videoMode || handheldMode || phoneMode;
+  if (el.pcbLength) el.pcbLength.disabled = true;
+  if (el.pcbWidth) el.pcbWidth.disabled = true;
+  if (el.originX) el.originX.disabled = true;
+  if (el.originY) el.originY.disabled = true;
   if (el.videoSpeed) el.videoSpeed.disabled = handheldMode;
   if (el.videoOverlap) el.videoOverlap.disabled = handheldMode;
   if (el.videoPanelNote) {
@@ -704,33 +690,21 @@ function inferenceLocationLabel(payload = {}) {
 
 function currentDetectionPlatform() {
   const checked = Array.prototype.find.call(el.platformInputs || [], (input) => input.checked);
-  state.detectionPlatform = checked ? checked.value : state.detectionPlatform || "huawei_cloud";
+  state.detectionPlatform = checked ? checked.value : state.detectionPlatform || "local_link_sim";
   return state.detectionPlatform;
 }
 
 function detectionPlatformLabel(platform = currentDetectionPlatform()) {
-  if (state.mode === "phone") return phoneExperimentProfileLabel(phoneExperimentProfileFromPlatform(platform));
-  if (platform === "huawei_cloud") return "华为云";
-  if (platform === "phone_browser") return "手机";
-  const hostLabel = state.detectionPlatformsStatus && state.detectionPlatformsStatus.host_label
-    ? state.detectionPlatformsStatus.host_label
-    : "本地电脑";
-  return `本地电脑(${hostLabel})`;
+  return phoneExperimentProfileLabel(phoneExperimentProfileFromPlatform(platform));
 }
 
 function syncDetectionPlatformUi() {
   Array.prototype.forEach.call(el.platformInputs || [], (input) => {
     input.checked = input.value === state.detectionPlatform;
   });
-  const phoneMode = state.mode === "phone";
-  if (el.cloudPlatformLabel) el.cloudPlatformLabel.textContent = phoneMode ? "华为云" : "华为云";
-  if (el.phonePlatformLabel) el.phonePlatformLabel.textContent = phoneMode ? "手机" : "手机";
-  if (el.localPlatformLabel) {
-    const hostLabel = state.detectionPlatformsStatus && state.detectionPlatformsStatus.host_label
-      ? state.detectionPlatformsStatus.host_label
-      : "本地电脑";
-    el.localPlatformLabel.textContent = phoneMode ? `本地电脑(${hostLabel})` : `本地电脑(${hostLabel})`;
-  }
+  if (el.cloudPlatformLabel) el.cloudPlatformLabel.textContent = "华为云";
+  if (el.phonePlatformLabel) el.phonePlatformLabel.textContent = "手机";
+  if (el.localPlatformLabel) el.localPlatformLabel.textContent = "本地（龙芯）";
   refreshRailBadges();
 }
 
@@ -745,7 +719,7 @@ function currentPhoneExperimentProfile() {
 
 function phoneExperimentProfileLabel(profile = currentPhoneExperimentProfile()) {
   if (profile === "phone_link_sim") return "手机";
-  if (profile === "local_link_sim") return "本地电脑";
+  if (profile === "local_link_sim") return "本地（龙芯）";
   return "华为云";
 }
 
@@ -1933,10 +1907,7 @@ async function captureBrowserFrameDetection() {
   }
   if (!state.browserCameraReady) return;
 
-  const platform = currentDetectionPlatform();
-  if (platform === "phone_browser") {
-    await waitForPhoneWorkerReady(7000);
-  }
+  const experimentProfile = currentPhoneExperimentProfile();
 
   setScanButtons(true);
   state.scanning = true;
@@ -1973,7 +1944,8 @@ async function captureBrowserFrameDetection() {
       body: JSON.stringify({
         upload_id: uploadPayload.upload_id,
         detection_profile: "fast",
-        detection_platform: platform,
+        detection_platform: "huawei_cloud",
+        phone_experiment_profile: experimentProfile,
         operation_mode: "real_browser_camera",
       }),
     });
@@ -1992,8 +1964,8 @@ async function captureBrowserFrameDetection() {
     if (result.upload_id && result.result_json) {
       setReportTarget({ target_type: "phone", upload_id: result.upload_id }, `浏览器相机整图结果 · 缺陷 ${(result.defects || []).length} 项`);
     }
-    setCommandHint(`浏览器相机检测完成：${detectionPlatformLabel(platform)}`, "good");
-    logEvent(`browser_camera_result ${detectionPlatformLabel(platform)} defects=${(result.defects || []).length}`);
+    setCommandHint(`浏览器相机检测完成：${phoneExperimentProfileLabel(experimentProfile)}档位 · 实际执行：华为云`, "good");
+    logEvent(`browser_camera_result ${phoneExperimentProfileLabel(experimentProfile)} actual=huawei_cloud defects=${(result.defects || []).length}`);
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
     el.phaseValue.textContent = "Browser Error";
@@ -3599,49 +3571,21 @@ function modePreflight(status) {
   if (!state.mode) {
     return { ok: false, message: "请先选择运行模式" };
   }
-  const algorithm = status && status.algorithm ? status.algorithm : {};
   const camera = status && status.camera ? status.camera : {};
   const motor = status && status.motor ? status.motor : {};
   const scan = status && status.scan ? status.scan : {};
   const platforms = status && status.detection_platforms ? status.detection_platforms : {};
   const cameraReady = camera.runtime && camera.runtime.opened;
-  const weightsReady = algorithm.weights && algorithm.weights.exists;
-  const scriptReady = algorithm.detect_script && algorithm.detect_script.exists;
-  const configReady = algorithm.config && algorithm.config.exists;
-  const platform = state.mode === "phone" ? "huawei_cloud" : currentDetectionPlatform();
 
   if (scan.running && !state.scanning) {
     return { ok: false, message: "已有检测任务运行，请先停止" };
   }
-  if (platform === "huawei_cloud") {
-    const cloud = platforms.huawei_cloud || (status && status.cloud_detection) || {};
-    if (!(cloud.enabled && cloud.configured)) {
-      return { ok: false, message: "华为云检测未配置或未启用，请切换平台或配置云端地址" };
-    }
-  } else if (platform === "phone_browser") {
-    const phone = platforms.phone_browser || (status && status.phone_inference) || {};
-    if (!phone.ready) {
-      return { ok: false, message: "手机推理 worker 未连接，请先在手机端打开推理页面" };
-    }
-    if (!weightsReady || !configReady) {
-      return { ok: false, message: "手机推理需要本机提供 ONNX 权重和类别配置" };
-    }
-  } else if (platform === "local_dnn") {
-    const localDnn = platforms.local_dnn || {};
-    if (!localDnn.model_exists) {
-      return { ok: false, message: "本地 DNN 模型不存在，请检查 best.onnx 或 LOONGSON_AOI_LOCAL_DNN_MODEL" };
-    }
-    if (localDnn.last_error) {
-      return { ok: false, message: `本地 DNN 初始化失败：${localDnn.last_error}` };
-    }
-  } else if (!weightsReady || !scriptReady || !configReady) {
-    return { ok: false, message: "YOLO/ONNX 权重、推理运行时或类别配置未就绪" };
+  const cloud = platforms.huawei_cloud || (status && status.cloud_detection) || {};
+  if (!(cloud.enabled && cloud.configured)) {
+    return { ok: false, message: "三个实验档位均由华为云执行；请先配置并启用华为云检测" };
   }
   if (state.mode === "real" && currentCameraInputMode() !== "browser" && !cameraReady && platforms.status_camera_probe) {
     return { ok: false, message: "相机未打开，无法进入相机抓拍流程" };
-  }
-  if (state.mode === "simulation" && !state.simulationImagePath) {
-    return { ok: false, message: "请先导入一张 PCB 图片" };
   }
   if (state.mode === "phone" && !state.selectedPhoneUploadId) {
     return { ok: false, message: "请先选择一张手机上传照片" };
@@ -3657,9 +3601,6 @@ async function startScan() {
   if (phoneMode) {
     resetPhoneViewport(false);
     startPhoneElapsedTimer();
-  }
-  if (state.mode !== "phone" && currentDetectionPlatform() === "phone_browser") {
-    await waitForPhoneWorkerReady(7000);
   }
   const status = await refreshSystemStatus({ log: true });
   const preflight = modePreflight(status);
@@ -3740,18 +3681,19 @@ async function startScan() {
     return;
   }
 
-  const imagePath = state.mode === "simulation" ? state.simulationImagePath : el.imagePath.value.trim();
+  const experimentProfile = currentPhoneExperimentProfile();
   const sent = send("start_scan", {
     operation_mode: state.mode,
     capture_mode: "real",
-    detection_platform: currentDetectionPlatform(),
-    pcb_length_mm: Number(el.pcbLength.value),
-    pcb_width_mm: Number(el.pcbWidth.value),
-    origin_x_mm: Number(el.originX.value),
-    origin_y_mm: Number(el.originY.value),
+    detection_platform: "huawei_cloud",
+    experiment_profile: experimentProfile,
+    pcb_length_mm: Number(el.pcbLength ? el.pcbLength.value : 100),
+    pcb_width_mm: Number(el.pcbWidth ? el.pcbWidth.value : 70),
+    origin_x_mm: Number(el.originX ? el.originX.value : 0),
+    origin_y_mm: Number(el.originY ? el.originY.value : 0),
     motion_speed_mm_s: state.mode === "real" ? Number(el.realMotionSpeed.value || 3) : undefined,
     settle_seconds: state.mode === "real" ? Number(el.realSettleSeconds.value || 0.05) : undefined,
-    image_path: imagePath,
+    image_path: el.imagePath ? el.imagePath.value.trim() : "algorithm/outputs/camera/latest.jpg",
   });
   if (!sent) {
     state.backendRunning = false;
@@ -4078,7 +4020,9 @@ if (el.cameraSourceInput) {
     }
   });
 }
-el.uploadSimulationBtn.addEventListener("click", uploadSimulationImages);
+if (el.uploadSimulationBtn) {
+  el.uploadSimulationBtn.addEventListener("click", uploadSimulationImages);
+}
 if (el.uploadPhoneBtn) {
   el.uploadPhoneBtn.addEventListener("click", uploadPhoneImages);
 }
@@ -4118,12 +4062,11 @@ Array.prototype.forEach.call(el.phoneProfileInputs || [], (input) => {
 Array.prototype.forEach.call(el.platformInputs || [], (input) => {
   input.addEventListener("change", () => {
     state.detectionPlatform = input.value;
-    if (state.mode === "phone") state.phoneExperimentProfile = phoneExperimentProfileFromPlatform(input.value);
+    state.phoneExperimentProfile = phoneExperimentProfileFromPlatform(input.value);
     syncDetectionPlatformUi();
-    maybeStartPhoneWorkerForSelectedPlatform();
-    const selectorLabel = state.mode === "phone" ? "检测实验档位" : "检测平台";
-    setCommandHint(`${selectorLabel}已切换为 ${detectionPlatformLabel(input.value)}`, "neutral");
-    logEvent(`${selectorLabel}切换为 ${detectionPlatformLabel(input.value)}`);
+    const selectorLabel = "检测实验档位";
+    setCommandHint(`${selectorLabel}已切换为 ${detectionPlatformLabel(input.value)} · 实际执行：华为云`, "neutral");
+    logEvent(`${selectorLabel}切换为 ${detectionPlatformLabel(input.value)} actual=huawei_cloud`);
   });
 });
 if (el.phoneImageFile) {
@@ -4134,12 +4077,16 @@ if (el.phoneImageFile) {
     if (el.uploadPhoneBtn) el.uploadPhoneBtn.disabled = Boolean(selectionError);
   });
 }
-el.simulationImageFile.addEventListener("change", () => {
-  const files = Array.from(el.simulationImageFile.files || []);
-  el.simulationUploadStatus.textContent = files.length
-    ? `已选择 ${files.length} 张图片`
-    : "尚未导入图片";
-});
+if (el.simulationImageFile) {
+  el.simulationImageFile.addEventListener("change", () => {
+    const files = Array.from(el.simulationImageFile.files || []);
+    if (el.simulationUploadStatus) {
+      el.simulationUploadStatus.textContent = files.length
+        ? `已选择 ${files.length} 张图片`
+        : "尚未导入图片";
+    }
+  });
+}
 if (el.simulationSourceSelect) {
   el.simulationSourceSelect.addEventListener("change", () => {
     setSimulationSource(el.simulationSourceSelect.value);
