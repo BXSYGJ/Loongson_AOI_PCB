@@ -106,6 +106,8 @@ const state = {
 
 let realSpeedUpdateTimer = null;
 let phoneElapsedTimer = null;
+let wsRetryTimer = null;
+let wsConnectTimer = null;
 const diagnosisWorkspaceSubscribers = new Set();
 
 function notifyDiagnosisWorkspace() {
@@ -342,13 +344,26 @@ function logEvent(text) {
   }
 }
 
-function setWsOnline(online) {
+function setWsState(connectionState, detail = "") {
+  const online = connectionState === "online";
+  const connecting = connectionState === "connecting";
   for (const dot of [el.wsDot, el.modeWsDot]) {
+    if (!dot) continue;
     dot.classList.toggle("online", online);
+    dot.classList.toggle("connecting", connecting);
   }
-  el.wsText.textContent = online ? "WebSocket 在线" : "WebSocket 离线";
-  el.modeWsText.textContent = online ? "WebSocket 在线" : "WebSocket 离线";
+  const label = online
+    ? "WebSocket 在线"
+    : connecting
+      ? "WebSocket 连接中…"
+      : detail || "WebSocket 连接失败，正在重试";
+  if (el.wsText) el.wsText.textContent = label;
+  if (el.modeWsText) el.modeWsText.textContent = label;
   refreshRailBadges();
+}
+
+function setWsOnline(online) {
+  setWsState(online ? "online" : "offline");
 }
 
 function currentModeRequirementsReady(status = state.lastStatus) {
@@ -436,25 +451,52 @@ function setCommandHint(message, tone = "neutral") {
 }
 
 function connectWs() {
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${protocol}://${location.host}/ws/control`);
+  if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return;
+  if (wsRetryTimer) {
+    window.clearTimeout(wsRetryTimer);
+    wsRetryTimer = null;
+  }
+  setWsState("connecting");
+  const socketUrl = new URL("/ws/control", window.location.href);
+  socketUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  let ws;
+  try {
+    ws = new WebSocket(socketUrl.href);
+  } catch (error) {
+    setWsState("offline", "WebSocket 地址无效，正在重试");
+    wsRetryTimer = window.setTimeout(connectWs, 1800);
+    return;
+  }
   state.ws = ws;
+  wsConnectTimer = window.setTimeout(() => {
+    if (ws.readyState === WebSocket.CONNECTING) ws.close(4000, "connect_timeout");
+  }, 7000);
 
   ws.addEventListener("open", () => {
+    if (wsConnectTimer) window.clearTimeout(wsConnectTimer);
+    wsConnectTimer = null;
     setWsOnline(true);
     logEvent("WebSocket connected");
   });
 
   ws.addEventListener("close", () => {
-    setWsOnline(false);
+    if (wsConnectTimer) window.clearTimeout(wsConnectTimer);
+    wsConnectTimer = null;
+    if (state.ws === ws) state.ws = null;
+    setWsState("offline");
     state.scanning = false;
     setScanButtons(false);
     logEvent("WebSocket closed, retrying");
-    setTimeout(connectWs, 1400);
+    if (!wsRetryTimer) {
+      wsRetryTimer = window.setTimeout(() => {
+        wsRetryTimer = null;
+        connectWs();
+      }, 1800);
+    }
   });
 
   ws.addEventListener("error", () => {
-    setWsOnline(false);
+    setWsState("offline", "WebSocket 连接异常，正在重试");
     logEvent("WebSocket error");
   });
 
@@ -4161,6 +4203,10 @@ Array.prototype.forEach.call(el.railButtons, (button) => {
   button.addEventListener("click", () => navigateToPanel(button));
 });
 window.addEventListener("resize", drawCanvas);
+window.addEventListener("online", connectWs);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && (!state.ws || state.ws.readyState > WebSocket.OPEN)) connectWs();
+});
 
 setWorkspaceView("balanced", { redraw: false });
 setProgressPercent(0);

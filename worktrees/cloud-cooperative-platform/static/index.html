@@ -3,41 +3,51 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light only" />
     <title>单板 PCB 智能缺陷检测系统</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260723-motor-telemetry" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260807-entry-redesign" />
   </head>
   <body>
     <main class="mode-screen" id="modeScreen">
       <section class="mode-hero">
         <div>
-          <span class="system-mark">Loongson AOI</span>
+          <span class="system-mark">LOONGSON AOI · CLOUD COOPERATIVE</span>
           <h1>单板 PCB 智能缺陷检测系统</h1>
-          <p>选择当前接入条件，控制台会切换到对应的拍照、检测和滑台联动流程。</p>
+          <p>选择采集方式进入检测工作台。两种模式均提供三档实验配置，实际推理由华为云统一执行。</p>
         </div>
         <div class="mode-status">
-          <span class="status-dot" id="modeWsDot"></span>
-          <span id="modeWsText">WebSocket 离线</span>
+          <span class="status-dot connecting" id="modeWsDot"></span>
+          <span id="modeWsText">WebSocket 连接中…</span>
         </div>
       </section>
 
       <section class="mode-grid" aria-label="选择运行模式">
-        <button class="mode-card" data-mode="real">
-          <span class="mode-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M4 17h16M6 14h12M8 11h8M10 8h4M5 20h14M7 17v3M17 17v3M12 4v4" /></svg>
+        <button class="mode-card mode-card-real" data-mode="real">
+          <span class="mode-number">01</span>
+          <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 17h16M6 14h12M8 11h8M10 8h4M5 20h14M7 17v3M17 17v3M12 4v4" /></svg></span>
+          <span class="mode-card-copy">
+            <strong>真实模式</strong>
+            <span>龙芯教育派控制滑台与相机，完成固定 16 点走停拍照、逐格云端检测和整板拼接。</span>
           </span>
-          <strong>真实模式</strong>
-          <span>真实滑台、真实 PCB、真实相机，完整走停拍照检测。</span>
-          <em>滑台 + 相机 + YOLO</em>
+          <span class="mode-feature-list"><span>真实滑台</span><span>OV9281</span><span>16 点扫描</span></span>
+          <em>进入真实检测工作台 <span aria-hidden="true">→</span></em>
         </button>
 
-        <button class="mode-card" data-mode="phone">
-          <span class="mode-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M8 2h8v20H8zM10 5h4M11 18h2M5 8l-3 3 3 3M19 8l3 3-3 3" /></svg>
+        <button class="mode-card mode-card-phone" data-mode="phone">
+          <span class="mode-number">02</span>
+          <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 2h8v20H8zM10 5h4M11 18h2M5 8l-3 3 3 3M19 8l3 3-3 3" /></svg></span>
+          <span class="mode-card-copy">
+            <strong>手机拍照</strong>
+            <span>手机拍照或从图库选择 PCB，上传至网站后执行整图华为云检测，支持单张与批量复核。</span>
           </span>
-          <strong>手机拍照</strong>
-          <span>同一局域网手机拍照上传 PCB 图片，电脑端选图后执行整图 YOLO 检测。</span>
-          <em>局域网上传 + 整图 YOLO</em>
+          <span class="mode-feature-list"><span>手机上传</span><span>最多 9 张</span><span>整图检测</span></span>
+          <em>进入手机检测工作台 <span aria-hidden="true">→</span></em>
         </button>
+      </section>
+
+      <section class="mode-route-note" aria-label="检测实验档位说明">
+        <div><strong>统一云端推理</strong><span>三档用于链路实验与展示，实际执行平台始终为华为云。</span></div>
+        <div class="mode-route-chips"><span>本地（龙芯）</span><b>→</b><span>手机</span><b>→</b><span>华为云</span></div>
       </section>
     </main>
 
@@ -478,7 +488,7 @@
 
     <script src="/static/vendor/qrcode.js?v=1.4.4"></script>
     <script src="/static/app_helpers.js?v=20260723-diagnosis-context"></script>
-    <script src="/static/app.js?v=20260723-motor-telemetry"></script>
+    <script src="/static/app.js?v=20260807-ws-reconnect"></script>
     <script src="/static/diagnosis_workspace.js?v=20260723-diagnosis-context"></script>
   </body>
 </html>
