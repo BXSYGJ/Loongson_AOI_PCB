@@ -290,4 +290,31 @@ assert.deepEqual(
   },
 );
 
-console.log("frontend helper tests passed");
+assert.equal(
+  helpers.escapeHtml('龙芯 <PCB> & "AOI" \'检测\''),
+  "龙芯 &lt;PCB&gt; &amp; &quot;AOI&quot; &#039;检测&#039;",
+);
+assert.equal(helpers.escapeHtml(0), "0");
+
+(async () => {
+  const received = [];
+  const response = {
+    body: null,
+    async text() {
+      return [
+        'event: phase\ndata: {"phase":"thinking"}',
+        'event: delta\ndata: {"content":"龙芯兼容"}',
+        'event: done\ndata: {"elapsed_ms":321}',
+        "",
+      ].join("\n\n");
+    },
+  };
+  const result = await helpers.consumeSseResponse(response, (events) => received.push(...events));
+  assert.deepEqual(result, { streamed: false, eventCount: 3 });
+  assert.deepEqual(received.map((event) => event.event), ["phase", "delta", "done"]);
+  assert.equal(received[1].data.content, "龙芯兼容");
+  console.log("frontend helper tests passed");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

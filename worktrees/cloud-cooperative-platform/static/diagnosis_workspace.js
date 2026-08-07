@@ -223,12 +223,7 @@
   }
 
   function escapeHtml(value) {
-    return String(value || "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
+    return helpers.escapeHtml(value);
   }
 
   function renderMarkdown(value) {
@@ -429,7 +424,7 @@
     dom.downloadChat.disabled = busy || !snapshot.sessionQuery;
     const tooManyPhoneImages = snapshot.mode === "phone" && snapshot.selectedPhoneUploadIds.length > 9;
     dom.send.disabled = busy || !snapshot.llmReportConfigured || !snapshot.sessionQuery || tooManyPhoneImages;
-    dom.cancel.disabled = !local.streamController;
+    dom.cancel.disabled = !local.streamController || typeof local.streamController.abort !== "function";
     dom.scope.textContent = scopeLabel(snapshot);
     dom.reportTarget.textContent = snapshot.reportTargetText || "请选择已检测单格、整板或手机结果";
     dom.contextStatus.textContent = snapshot.reportStatusText || "等待检测结果";
@@ -478,34 +473,27 @@
       return;
     }
 
-    local.streamController = new AbortController();
+    local.streamController = typeof AbortController === "function" ? new AbortController() : {};
     local.pendingUser = message || "请分析所选检测上下文。";
     local.streamText = "";
     dom.input.value = "";
     setStreamState(true, "正在准备检测上下文");
     renderHistory();
     try {
-      const response = await fetch("/api/llm/chat/stream", {
+      const requestOptions = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: local.streamController.signal,
-      });
-      if (!response.ok || !response.body) {
+      };
+      if (local.streamController.signal) requestOptions.signal = local.streamController.signal;
+      const response = await fetch("/api/llm/chat/stream", requestOptions);
+      if (!response.ok) {
         const errorPayload = await response.json().catch(() => ({}));
         throw new Error(errorPayload.detail || `chat ${response.status}`);
       }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
       let completed = false;
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        buffer += decoder.decode(chunk.value, { stream: true });
-        const parsed = helpers.parseSseFrames(buffer);
-        buffer = parsed.rest;
-        for (const event of parsed.events) {
+      await helpers.consumeSseResponse(response, (events) => {
+        for (const event of events) {
           if (event.event === "phase") {
             const phase = event.data && event.data.phase;
             setStreamState(true, phase === "thinking" ? "深度思考中" : event.data.message || "正在生成回答");
@@ -520,7 +508,7 @@
             throw new Error(event.data && event.data.message || "AI 聊天失败");
           }
         }
-      }
+      });
       if (!completed) throw new Error("AI 流式连接提前中断，已保留当前收到的内容。 ");
       local.pendingUser = "";
       local.streamText = "";
@@ -542,7 +530,7 @@
   }
 
   function cancelChat() {
-    if (local.streamController) local.streamController.abort();
+    if (local.streamController && typeof local.streamController.abort === "function") local.streamController.abort();
   }
 
   async function generateReport() {

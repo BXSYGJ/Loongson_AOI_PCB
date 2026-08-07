@@ -3,6 +3,17 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.AoiUiHelpers = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function createAoiUiHelpers() {
+  function escapeHtml(value) {
+    const replacements = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;",
+    };
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (character) => replacements[character]);
+  }
+
   function preferredPhoneUploadUrl(urls, currentOrigin = "") {
     const values = Array.isArray(urls) ? urls : [];
     const candidate = values.find((value) => typeof value === "string" && value.trim());
@@ -334,7 +345,47 @@
     return { events, rest };
   }
 
+  async function consumeSseResponse(response, onEvents) {
+    const emit = typeof onEvents === "function" ? onEvents : () => {};
+    let buffer = "";
+    let eventCount = 0;
+
+    function flush(force = false) {
+      const parsed = parseSseFrames(force ? `${buffer}\n\n` : buffer);
+      buffer = parsed.rest;
+      if (parsed.events.length) {
+        eventCount += parsed.events.length;
+        emit(parsed.events);
+      }
+    }
+
+    const canStream = Boolean(
+      response
+      && response.body
+      && typeof response.body.getReader === "function"
+      && typeof TextDecoder !== "undefined",
+    );
+    if (!canStream) {
+      buffer = response && typeof response.text === "function" ? await response.text() : "";
+      flush(true);
+      return { streamed: false, eventCount };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      flush(false);
+    }
+    buffer += decoder.decode();
+    flush(true);
+    return { streamed: true, eventCount };
+  }
+
   return {
+    escapeHtml,
     preferredPhoneUploadUrl,
     resolveDefectSourceCell,
     phoneExperimentProfileFromPlatform,
@@ -357,5 +408,6 @@
     diagnosisArtifactControls,
     defectChatReference,
     parseSseFrames,
+    consumeSseResponse,
   };
 }));

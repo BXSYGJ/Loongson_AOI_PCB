@@ -290,12 +290,7 @@ function requestId() {
 }
 
 function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+  return window.AoiUiHelpers.escapeHtml(value);
 }
 
 function artifactUrl(path) {
@@ -2561,7 +2556,13 @@ function handlePhoneCanvasPointerDown(event) {
     clientY: event.clientY,
     moved: 0,
   };
-  el.canvas.setPointerCapture(event.pointerId);
+  if (typeof el.canvas.setPointerCapture === "function") {
+    try {
+      el.canvas.setPointerCapture(event.pointerId);
+    } catch (_error) {
+      // Some older WebKit builds expose Pointer Events without pointer capture.
+    }
+  }
   el.canvas.classList.add("is-dragging");
 }
 
@@ -2592,7 +2593,82 @@ function handlePhoneCanvasPointerEnd(event) {
   state.suppressCanvasClick = pointer.moved > 4;
   state.phonePointer = null;
   el.canvas.classList.remove("is-dragging");
-  if (el.canvas.hasPointerCapture(event.pointerId)) el.canvas.releasePointerCapture(event.pointerId);
+  if (
+    typeof event.pointerId === "number"
+    &&
+    typeof el.canvas.hasPointerCapture === "function"
+    && typeof el.canvas.releasePointerCapture === "function"
+    && el.canvas.hasPointerCapture(event.pointerId)
+  ) {
+    el.canvas.releasePointerCapture(event.pointerId);
+  }
+}
+
+let phoneTouchMouseBlockUntil = 0;
+
+function beginPhoneCanvasLegacyDrag(pointerId, clientX, clientY) {
+  handlePhoneCanvasPointerDown({ pointerId, clientX, clientY, button: 0 });
+}
+
+function movePhoneCanvasLegacyDrag(pointerId, clientX, clientY) {
+  handlePhoneCanvasPointerMove({ pointerId, clientX, clientY });
+}
+
+function endPhoneCanvasLegacyDrag(pointerId) {
+  handlePhoneCanvasPointerEnd({ pointerId });
+}
+
+function findChangedTouch(event, identifier = null) {
+  const touches = event && event.changedTouches ? event.changedTouches : [];
+  for (let index = 0; index < touches.length; index += 1) {
+    if (identifier == null || touches[index].identifier === identifier) return touches[index];
+  }
+  return null;
+}
+
+function handlePhoneCanvasTouchStart(event) {
+  if (state.mode !== "phone" || state.phonePointer || !event.touches || event.touches.length !== 1) return;
+  const touch = findChangedTouch(event);
+  if (!touch) return;
+  phoneTouchMouseBlockUntil = Date.now() + 800;
+  beginPhoneCanvasLegacyDrag(`touch-${touch.identifier}`, touch.clientX, touch.clientY);
+  event.preventDefault();
+}
+
+function handlePhoneCanvasTouchMove(event) {
+  const pointer = state.phonePointer;
+  if (!pointer || typeof pointer.pointerId !== "string" || !pointer.pointerId.startsWith("touch-")) return;
+  const identifier = Number(pointer.pointerId.slice(6));
+  const touch = findChangedTouch(event, identifier);
+  if (!touch) return;
+  movePhoneCanvasLegacyDrag(pointer.pointerId, touch.clientX, touch.clientY);
+  event.preventDefault();
+}
+
+function handlePhoneCanvasTouchEnd(event) {
+  const pointer = state.phonePointer;
+  if (!pointer || typeof pointer.pointerId !== "string" || !pointer.pointerId.startsWith("touch-")) return;
+  const identifier = Number(pointer.pointerId.slice(6));
+  if (!findChangedTouch(event, identifier)) return;
+  phoneTouchMouseBlockUntil = Date.now() + 800;
+  endPhoneCanvasLegacyDrag(pointer.pointerId);
+  event.preventDefault();
+}
+
+function handlePhoneCanvasMouseDown(event) {
+  if (state.mode !== "phone" || Date.now() < phoneTouchMouseBlockUntil || event.button !== 0) return;
+  beginPhoneCanvasLegacyDrag("mouse", event.clientX, event.clientY);
+  event.preventDefault();
+}
+
+function handlePhoneCanvasMouseMove(event) {
+  if (!state.phonePointer || state.phonePointer.pointerId !== "mouse") return;
+  movePhoneCanvasLegacyDrag("mouse", event.clientX, event.clientY);
+}
+
+function handlePhoneCanvasMouseUp() {
+  if (!state.phonePointer || state.phonePointer.pointerId !== "mouse") return;
+  endPhoneCanvasLegacyDrag("mouse");
 }
 
 function drawHandheldCanvas(ctx, width, height) {
@@ -4187,10 +4263,20 @@ el.zUpBtn.addEventListener("click", () => send("z_jog", { direction: "up", dist:
 el.zDownBtn.addEventListener("click", () => send("z_jog", { direction: "down", dist: Number(el.zDist.value) }));
 el.canvas.addEventListener("click", selectCellFromCanvas);
 el.canvas.addEventListener("wheel", handlePhoneCanvasWheel, { passive: false });
-el.canvas.addEventListener("pointerdown", handlePhoneCanvasPointerDown);
-el.canvas.addEventListener("pointermove", handlePhoneCanvasPointerMove);
-el.canvas.addEventListener("pointerup", handlePhoneCanvasPointerEnd);
-el.canvas.addEventListener("pointercancel", handlePhoneCanvasPointerEnd);
+if ("PointerEvent" in window) {
+  el.canvas.addEventListener("pointerdown", handlePhoneCanvasPointerDown);
+  el.canvas.addEventListener("pointermove", handlePhoneCanvasPointerMove);
+  el.canvas.addEventListener("pointerup", handlePhoneCanvasPointerEnd);
+  el.canvas.addEventListener("pointercancel", handlePhoneCanvasPointerEnd);
+} else {
+  el.canvas.addEventListener("touchstart", handlePhoneCanvasTouchStart, { passive: false });
+  el.canvas.addEventListener("touchmove", handlePhoneCanvasTouchMove, { passive: false });
+  el.canvas.addEventListener("touchend", handlePhoneCanvasTouchEnd, { passive: false });
+  el.canvas.addEventListener("touchcancel", handlePhoneCanvasTouchEnd, { passive: false });
+  el.canvas.addEventListener("mousedown", handlePhoneCanvasMouseDown);
+  window.addEventListener("mousemove", handlePhoneCanvasMouseMove);
+  window.addEventListener("mouseup", handlePhoneCanvasMouseUp);
+}
 el.canvas.addEventListener("dblclick", (event) => {
   if (state.mode !== "phone") return;
   event.preventDefault();

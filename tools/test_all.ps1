@@ -33,7 +33,14 @@ try {
     try {
         Invoke-Checked -Description '完整网站 Python 测试' -Action { & $PythonCommand -m pytest -q }
         Invoke-Checked -Description '前端辅助函数测试' -Action { & $node test_frontend_helpers.cjs }
-        Invoke-Checked -Description '前端 JavaScript 语法检查' -Action { & $node --check ([System.IO.Path]::Combine($webRoot, 'static', 'app.js')) }
+        $frontendScripts = @(
+            [System.IO.Path]::Combine($webRoot, 'static', 'app_helpers.js'),
+            [System.IO.Path]::Combine($webRoot, 'static', 'app.js'),
+            [System.IO.Path]::Combine($webRoot, 'static', 'diagnosis_workspace.js')
+        )
+        foreach ($frontendScript in $frontendScripts) {
+            Invoke-Checked -Description "前端 JavaScript 语法检查：$([System.IO.Path]::GetFileName($frontendScript))" -Action { & $node --check $frontendScript }
+        }
     }
     finally {
         Pop-Location

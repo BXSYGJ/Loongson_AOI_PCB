@@ -30,7 +30,7 @@ class PhoneExperimentTests(unittest.TestCase):
         self.assertNotIn('手机上传 + 华为云', html)
         self.assertIn('id="modeWsText">WebSocket 连接中…', html)
         self.assertIn('/static/styles.css?v=20260807-entry-simple', html)
-        self.assertIn('/static/app.js?v=20260807-ws-reconnect', html)
+        self.assertIn('/static/app.js?v=20260807-midori7', html)
         self.assertIn('new URL("/ws/control", window.location.href)', script)
         self.assertIn('wsRetryTimer = window.setTimeout', script)
         self.assertLess(html.index('value="local_link_sim" checked'), html.index('value="phone_link_sim"'))
