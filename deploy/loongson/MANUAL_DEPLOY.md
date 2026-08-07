@@ -76,7 +76,7 @@ sudo -E env \
   sh deploy/loongson/run_phone_server.sh
 ```
 
-浏览器访问 `http://<龙芯IP>:8000/`，先验证模拟模式和系统状态。
+教育派本机 Midori 7.0 访问 `http://127.0.0.1:8000/`；同一局域网内的其他设备才访问 `http://<龙芯IP>:8000/`。先确认首页显示“WebSocket 在线”、系统状态可加载且当前为 motor dry-run。不要用华为云 `http://116.205.117.33:8020/` 代替本地页面控制实体滑台。浏览器兼容与触摸屏注意事项见 [龙芯教育派部署文档](../../docs/DEPLOY_LOONGSON.md#midori-7-触摸屏说明)。
 
 ## 6. 真实模式启动
 

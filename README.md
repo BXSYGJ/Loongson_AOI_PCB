@@ -34,6 +34,8 @@
 > `D:/AAAED/code/Loongson_AOI_PCB/worktrees/main/packages/Loongson_AOI_PCB_loongson_2k1000la.zip`
 >（仓库内相对路径为 `packages/Loongson_AOI_PCB_loongson_2k1000la.zip`）。
 > **不要使用**旧路径 `D:\AAAED\code\Loongson_AOI_PCB\dist\loongson_phone_bundle.zip`；该文件属于早期 phone bundle，不能替代当前完整龙芯部署包。
+>
+> **教育派触摸屏浏览器：** 已针对系统自带的 Midori 7.0（WebKitGTK 2.26.4）增加兼容处理。实体教育派应在 Midori 中打开 `http://127.0.0.1:8000/`，由本地服务控制滑台和 OV9281，再调用华为云 8010 推理；不要用华为云 `http://116.205.117.33:8020/` 代替本地控制页面。详细说明见 [龙芯教育派部署文档](docs/DEPLOY_LOONGSON.md#midori-7-触摸屏说明)。
 
 | 包 | 用途 |
 | --- | --- |
