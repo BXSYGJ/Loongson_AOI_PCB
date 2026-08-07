@@ -1,5 +1,9 @@
 # 龙芯教育派 v1.0.0 手动部署
 
+> **部署前检查：** 本文只适用于
+> `D:/AAAED/code/Loongson_AOI_PCB/worktrees/main/packages/Loongson_AOI_PCB_loongson_2k1000la.zip`。
+> 不要误用 `D:\AAAED\code\Loongson_AOI_PCB\dist\loongson_phone_bundle.zip`；后者是早期旧包，不包含当前完整交接版本所需的统一目录和部署内容。
+
 ## 1. FinalShell 上传
 
 在 FinalShell 文件管理器中，把 `Loongson_AOI_PCB_loongson_2k1000la.zip` 上传到：

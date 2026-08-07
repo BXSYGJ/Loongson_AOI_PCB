@@ -30,6 +30,11 @@
 
 ## 三个平台部署包
 
+> **龙芯部署包注意：** 当前龙芯教育派 2K1000LA 的正式部署包是
+> `D:/AAAED/code/Loongson_AOI_PCB/worktrees/main/packages/Loongson_AOI_PCB_loongson_2k1000la.zip`
+>（仓库内相对路径为 `packages/Loongson_AOI_PCB_loongson_2k1000la.zip`）。
+> **不要使用**旧路径 `D:\AAAED\code\Loongson_AOI_PCB\dist\loongson_phone_bundle.zip`；该文件属于早期 phone bundle，不能替代当前完整龙芯部署包。
+
 | 包 | 用途 |
 | --- | --- |
 | `packages/Loongson_AOI_PCB_windows.zip` | Windows 11 + Python 3.12 本地开发、网站和模型验证 |

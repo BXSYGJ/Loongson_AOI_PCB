@@ -1,5 +1,10 @@
 # 龙芯教育派部署
 
+> **必须确认包名：** 当前正式部署包为
+> `D:/AAAED/code/Loongson_AOI_PCB/worktrees/main/packages/Loongson_AOI_PCB_loongson_2k1000la.zip`，
+> 即仓库内的 `packages/Loongson_AOI_PCB_loongson_2k1000la.zip`。
+> `D:\AAAED\code\Loongson_AOI_PCB\dist\loongson_phone_bundle.zip` 是旧版 phone bundle，内容和目录结构均不等同于当前完整部署包，请勿上传或用于本页步骤。
+
 ## FinalShell 手动上传
 
 本项目不自动向龙芯板上传。请在 FinalShell 中把下列文件拖入龙芯板：
