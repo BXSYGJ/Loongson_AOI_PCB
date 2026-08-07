@@ -25,6 +25,7 @@ class PhoneExperimentTests(unittest.TestCase):
         self.assertNotIn('选择采集方式进入检测工作台', html)
         self.assertNotIn('两种模式均提供三档实验配置', html)
         self.assertIn('id="modeWsText">WebSocket 连接中…', html)
+        self.assertIn('/static/styles.css?v=20260807-entry-simple', html)
         self.assertIn('/static/app.js?v=20260807-ws-reconnect', html)
         self.assertIn('new URL("/ws/control", window.location.href)', script)
         self.assertIn('wsRetryTimer = window.setTimeout', script)
