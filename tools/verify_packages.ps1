@@ -17,6 +17,7 @@ try {
             'Loongson_AOI_PCB/PACKAGE_MANIFEST.json',
             'Loongson_AOI_PCB/deploy/windows/run_windows.ps1',
             'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/main.py',
+            'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/static/board_lite.html',
             'Loongson_AOI_PCB/worktrees/algorithm-ai/runs/detect/pcb_defects/weights/best.pt',
             'Loongson_AOI_PCB/worktrees/algorithm-ai/runs/detect/pcb_defects/weights/best.onnx'
         )
@@ -26,13 +27,16 @@ try {
             'Loongson_AOI_PCB/deploy/huawei/install_or_update.sh',
             'Loongson_AOI_PCB/cloud-backend/app/main.py',
             'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/main.py',
+            'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/static/board_lite.html',
             'Loongson_AOI_PCB/worktrees/algorithm-ai/runs/detect/pcb_defects/weights/best.onnx'
         )
         'Loongson_AOI_PCB_loongson_2k1000la.zip' = @(
             'Loongson_AOI_PCB/VERSION',
             'Loongson_AOI_PCB/PACKAGE_MANIFEST.json',
             'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/main.py',
+            'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/static/board_lite.html',
             'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/llm_chat.py',
+            'Loongson_AOI_PCB/deploy/loongson/start_loongson_aoi_server.sh',
             'Loongson_AOI_PCB/worktrees/cloud-cooperative-platform/motor_gpio_system_helper.py',
             'Loongson_AOI_PCB/worktrees/algorithm-ai/runs/detect/pcb_defects/weights/best.onnx'
         )

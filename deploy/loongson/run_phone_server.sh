@@ -16,6 +16,7 @@ fi
 
 . "$VENV_DIR/bin/activate"
 . "$SCRIPT_DIR/env_phone_detection.sh"
+export LOONGSON_AOI_BOARD_LITE_UI="${LOONGSON_AOI_BOARD_LITE_UI:-1}"
 cd "$UI_DIR"
 
 echo "Starting Loongson AOI simulation-first server ..."
@@ -24,6 +25,7 @@ echo "Algorithm root: $LOONGSON_AOI_ALGORITHM_ROOT"
 echo "Weights: $LOONGSON_AOI_WEIGHTS"
 echo "Motor dry-run: $LOONGSON_AOI_MOTOR_DRY_RUN"
 echo "Board safe mode: $LOONGSON_AOI_BOARD_SAFE_MODE"
+echo "Board lite UI: $LOONGSON_AOI_BOARD_LITE_UI"
 echo "Simulation max dimension: $LOONGSON_AOI_SIMULATION_MAX_DIMENSION"
 echo "OpenCV threads: $LOONGSON_AOI_OPENCV_THREADS"
 echo "Listen: $HOST:$PORT"

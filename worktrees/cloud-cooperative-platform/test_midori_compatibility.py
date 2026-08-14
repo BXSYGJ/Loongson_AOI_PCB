@@ -5,7 +5,7 @@ STATIC_ROOT = Path(__file__).resolve().parent / "static"
 
 
 def test_public_javascript_avoids_string_replace_all() -> None:
-    for name in ("app_helpers.js", "app.js", "diagnosis_workspace.js"):
+    for name in ("app_helpers.js", "app.js", "diagnosis_workspace.js", "board_lite.html", "phone.html"):
         source = (STATIC_ROOT / name).read_text(encoding="utf-8")
         assert ".replaceAll(" not in source, f"{name} still requires String.prototype.replaceAll"
 

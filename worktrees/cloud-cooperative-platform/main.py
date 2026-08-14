@@ -94,6 +94,7 @@ def _is_loongson_host() -> bool:
 EDGE_SAFE_MODE = _env_bool("LOONGSON_AOI_EDGE_SAFE_MODE", _is_loongson_host())
 STATUS_CAMERA_PROBE = _env_bool("LOONGSON_AOI_STATUS_CAMERA_PROBE", not EDGE_SAFE_MODE)
 PHONE_WORKER_ALLOW_DESKTOP = _env_bool("LOONGSON_AOI_ALLOW_DESKTOP_PHONE_WORKER", False)
+BOARD_LITE_UI = _env_bool("LOONGSON_AOI_BOARD_LITE_UI", False)
 REAL_SCAN_PRESET = os.getenv("LOONGSON_AOI_REAL_SCAN_PRESET", "fixed16").strip().lower()
 FIXED_SCAN_STEP_X_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_X_MM", 30.0)
 FIXED_SCAN_STEP_Y_MM = _env_float("LOONGSON_AOI_FIXED_SCAN_STEP_Y_MM", 18.0)
@@ -131,6 +132,9 @@ phone_detection_lock = asyncio.Lock()
 phone_batch_tasks: dict[str, asyncio.Task] = {}
 active_stop_event: asyncio.Event | None = None
 active_scan_task: asyncio.Task | None = None
+active_scan_owner: WebSocket | None = None
+control_websockets: set[WebSocket] = set()
+control_websockets_lock = asyncio.Lock()
 
 
 class RealScanRuntimeControl:
@@ -1234,11 +1238,37 @@ def video_position_payload(
     return payload
 
 
-async def send_packet(websocket: WebSocket, packet_type: str, payload: dict[str, Any], scan_id: str | None = None) -> None:
+async def send_packet(
+    websocket: WebSocket,
+    packet_type: str,
+    payload: dict[str, Any],
+    scan_id: str | None = None,
+    *,
+    broadcast: bool = False,
+) -> None:
     packet: dict[str, Any] = {"type": packet_type, "payload": payload}
     if scan_id is not None:
         packet["scan_id"] = scan_id
-    await websocket.send_json(packet)
+    if not broadcast:
+        await websocket.send_json(packet)
+        return
+
+    stale: list[WebSocket] = []
+    async with control_websockets_lock:
+        targets = list(control_websockets)
+    if websocket not in targets:
+        targets.append(websocket)
+
+    for target in targets:
+        try:
+            await target.send_json(packet)
+        except Exception:
+            stale.append(target)
+
+    if stale:
+        async with control_websockets_lock:
+            for target in stale:
+                control_websockets.discard(target)
 
 
 async def run_real_scan_capture_queue(
@@ -1273,7 +1303,7 @@ async def run_real_scan_capture_queue(
 
     async def emit(packet_type: str, payload: dict[str, Any]) -> None:
         async with send_lock:
-            await send_packet(websocket, packet_type, payload, scan_id)
+            await send_packet(websocket, packet_type, payload, scan_id, broadcast=True)
 
     await emit("grid_plan", plan_payload)
 
@@ -1938,7 +1968,7 @@ async def run_scan(
     plan_payload = dict(plan)
     plan_payload["operation_mode"] = operation_mode
     plan_payload["detection_platform"] = detection_platform
-    await send_packet(websocket, "grid_plan", plan_payload, scan_id)
+    await send_packet(websocket, "grid_plan", plan_payload, scan_id, broadcast=True)
     manifest_cells: dict[str, dict[str, Any]] = {}
 
     def update_manifest_cell(row: int, col: int, data: dict[str, Any]) -> None:
@@ -2386,7 +2416,7 @@ async def run_video_scan(
 
     async def emit(packet_type: str, payload: dict[str, Any]) -> None:
         async with send_lock:
-            await send_packet(websocket, packet_type, payload, scan_id)
+            await send_packet(websocket, packet_type, payload, scan_id, broadcast=True)
 
     await emit("video_plan", plan)
 
@@ -2567,7 +2597,7 @@ async def run_handheld_detection(
 
     async def emit(packet_type: str, payload: dict[str, Any]) -> None:
         async with send_lock:
-            await send_packet(websocket, packet_type, payload, scan_id)
+            await send_packet(websocket, packet_type, payload, scan_id, broadcast=True)
 
     await emit(
         "handheld_phase",
@@ -2781,6 +2811,16 @@ def normalize_operation_mode(payload: dict[str, Any]) -> tuple[str, str]:
 
 @app.get("/")
 async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / ("board_lite.html" if BOARD_LITE_UI else "index.html"))
+
+
+@app.get("/lite")
+async def board_lite() -> FileResponse:
+    return FileResponse(STATIC_DIR / "board_lite.html")
+
+
+@app.get("/full")
+async def full_console() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -3230,9 +3270,11 @@ async def fixed16_grid_preview(
 
 @app.websocket("/ws/control")
 async def websocket_control(websocket: WebSocket) -> None:
-    global active_stop_event, active_scan_task, active_real_scan_control
+    global active_stop_event, active_scan_task, active_real_scan_control, active_scan_owner
 
     await websocket.accept()
+    async with control_websockets_lock:
+        control_websockets.add(websocket)
     await send_packet(websocket, "ack", {"message": "WebSocket connected."})
 
     try:
@@ -3354,9 +3396,10 @@ async def websocket_control(websocket: WebSocket) -> None:
                 scan_id = str(uuid.uuid4())
                 stop_event = asyncio.Event()
                 active_stop_event = stop_event
+                active_scan_owner = websocket
 
                 async def locked_phone_detection() -> None:
-                    global active_stop_event
+                    global active_stop_event, active_scan_owner
                     async with scan_lock:
                         try:
                             await run_phone_detection(
@@ -3370,6 +3413,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                             )
                         finally:
                             active_stop_event = None
+                            active_scan_owner = None
 
                 active_scan_task = asyncio.create_task(locked_phone_detection())
                 await send_packet(
@@ -3444,9 +3488,10 @@ async def websocket_control(websocket: WebSocket) -> None:
                 scan_id = str(uuid.uuid4())
                 stop_event = asyncio.Event()
                 active_stop_event = stop_event
+                active_scan_owner = websocket
 
                 async def locked_scan() -> None:
-                    global active_stop_event
+                    global active_stop_event, active_scan_owner
                     async with scan_lock:
                         try:
                             await run_scan(
@@ -3462,6 +3507,7 @@ async def websocket_control(websocket: WebSocket) -> None:
                             )
                         finally:
                             active_stop_event = None
+                            active_scan_owner = None
 
                 active_scan_task = asyncio.create_task(locked_scan())
                 await send_packet(
@@ -3483,10 +3529,14 @@ async def websocket_control(websocket: WebSocket) -> None:
             await send_packet(websocket, "scan_error", {"request_id": request_id, "message": f"Unknown packet type: {packet_type}"})
 
     except WebSocketDisconnect:
-        if active_stop_event is not None:
+        async with control_websockets_lock:
+            control_websockets.discard(websocket)
+        if active_stop_event is not None and active_scan_owner is websocket:
             active_stop_event.set()
             motor_controller.request_stop()
             camera_trigger.stop_video_detection()
     finally:
+        async with control_websockets_lock:
+            control_websockets.discard(websocket)
         if active_scan_task and active_scan_task.done():
             active_scan_task = None

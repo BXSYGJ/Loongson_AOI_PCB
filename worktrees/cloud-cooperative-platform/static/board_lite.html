@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Loongson AOI Lite</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      background: #f4f6f8;
+      color: #17202a;
+      font-size: 18px;
+    }
+    header {
+      padding: 14px 18px;
+      background: #16324f;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 14px;
+      padding: 14px;
+    }
+    section {
+      background: #fff;
+      border: 1px solid #d6dee8;
+      border-radius: 6px;
+      padding: 14px;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+    label {
+      display: block;
+      margin: 10px 0 6px;
+      color: #475467;
+      font-size: 16px;
+    }
+    input, select, button {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid #b8c4d2;
+      border-radius: 6px;
+      font-size: 18px;
+      padding: 8px 10px;
+      background: #fff;
+      color: #17202a;
+    }
+    button {
+      cursor: pointer;
+      font-weight: 700;
+      border: 0;
+      margin-top: 10px;
+    }
+    .primary { background: #1f6feb; color: #fff; }
+    .secondary { background: #e9f0f8; color: #16324f; border: 1px solid #b8c4d2; }
+    .danger { background: #c93535; color: #fff; }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .status {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .stat {
+      background: #f7f9fb;
+      border: 1px solid #d6dee8;
+      border-radius: 6px;
+      padding: 10px;
+      min-height: 76px;
+    }
+    .stat span {
+      display: block;
+      color: #667085;
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+    .stat strong {
+      display: block;
+      font-size: 20px;
+      word-break: break-word;
+    }
+    #log {
+      height: 460px;
+      overflow: auto;
+      background: #101828;
+      color: #e6edf3;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: Consolas, monospace;
+      font-size: 15px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    .ok { color: #1f7a3d; }
+    .bad { color: #b42318; }
+    .muted { color: #667085; }
+    @media (max-width: 800px) {
+      main { grid-template-columns: 1fr; }
+      .status { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>龙芯 AOI 板端轻量控制台</h1>
+    <div id="clock">--:--:--</div>
+  </header>
+
+  <main>
+    <section>
+      <h2>控制</h2>
+      <div class="row">
+        <div>
+          <label for="length">PCB 长 mm</label>
+          <input id="length" type="number" value="100" min="1" step="1" />
+        </div>
+        <div>
+          <label for="width">PCB 宽 mm</label>
+          <input id="width" type="number" value="70" min="1" step="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="speed">滑台速度 mm/s</label>
+          <input id="speed" type="number" value="10" min="0.1" max="25" step="0.1" />
+        </div>
+        <div>
+          <label for="settle">停稳时间 s</label>
+          <input id="settle" type="number" value="0.05" min="0" max="5" step="0.01" />
+        </div>
+      </div>
+
+      <label for="profile">检测档位</label>
+      <select id="profile">
+        <option value="local_link_sim">标准档</option>
+        <option value="phone_link_sim">快速档</option>
+        <option value="cloud_baseline">云端基准</option>
+      </select>
+
+      <button class="secondary" id="connectBtn">连接服务</button>
+      <button class="secondary" id="homeBtn">三轴回零</button>
+      <button class="primary" id="startBtn">开始真实检测</button>
+      <button class="danger" id="stopBtn">停止检测</button>
+      <button class="secondary" id="refreshBtn">刷新状态</button>
+      <button class="secondary" id="phoneBtn">打开手机上传页</button>
+    </section>
+
+    <section>
+      <h2>状态</h2>
+      <div class="status">
+        <div class="stat"><span>连接</span><strong id="wsState">未连接</strong></div>
+        <div class="stat"><span>阶段</span><strong id="phase">等待</strong></div>
+        <div class="stat"><span>进度</span><strong id="progress">0 / 0</strong></div>
+        <div class="stat"><span>缺陷</span><strong id="defects">0</strong></div>
+      </div>
+      <div class="status">
+        <div class="stat"><span>云检测</span><strong id="cloud">未知</strong></div>
+        <div class="stat"><span>电机</span><strong id="motor">未知</strong></div>
+        <div class="stat"><span>相机</span><strong id="camera">未知</strong></div>
+        <div class="stat"><span>服务</span><strong id="server">未知</strong></div>
+      </div>
+      <div id="log"></div>
+    </section>
+  </main>
+
+  <script>
+    const el = {
+      clock: document.getElementById("clock"),
+      wsState: document.getElementById("wsState"),
+      phase: document.getElementById("phase"),
+      progress: document.getElementById("progress"),
+      defects: document.getElementById("defects"),
+      cloud: document.getElementById("cloud"),
+      motor: document.getElementById("motor"),
+      camera: document.getElementById("camera"),
+      server: document.getElementById("server"),
+      log: document.getElementById("log"),
+      length: document.getElementById("length"),
+      width: document.getElementById("width"),
+      speed: document.getElementById("speed"),
+      settle: document.getElementById("settle"),
+      profile: document.getElementById("profile"),
+    };
+
+    let ws = null;
+    let requestId = 0;
+
+    function now() {
+      return new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    }
+
+    function log(message) {
+      el.log.textContent = `${now()} ${message}\n` + el.log.textContent;
+      if (el.log.textContent.length > 9000) {
+        el.log.textContent = el.log.textContent.slice(0, 9000);
+      }
+    }
+
+    function setWsState(text, ok) {
+      el.wsState.textContent = text;
+      el.wsState.className = ok ? "ok" : "bad";
+    }
+
+    function wsUrl() {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${location.host}/ws/control`;
+    }
+
+    function connect() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      ws = new WebSocket(wsUrl());
+      setWsState("连接中", false);
+      ws.onopen = () => {
+        setWsState("已连接", true);
+        log("WebSocket connected");
+      };
+      ws.onclose = () => {
+        setWsState("已断开", false);
+        log("WebSocket closed");
+      };
+      ws.onerror = () => {
+        setWsState("错误", false);
+        log("WebSocket error");
+      };
+      ws.onmessage = (event) => {
+        try {
+          handlePacket(JSON.parse(event.data));
+        } catch (error) {
+          log(`bad packet: ${error}`);
+        }
+      };
+    }
+
+    function send(type, payload = {}) {
+      connect();
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log("服务未连接，请稍后再试");
+        return false;
+      }
+      ws.send(JSON.stringify({ type, request_id: `lite_${++requestId}`, payload }));
+      log(`send ${type}`);
+      return true;
+    }
+
+    function handlePacket(packet) {
+      const type = packet.type || "unknown";
+      const payload = packet.payload || {};
+      if (payload.phase) el.phase.textContent = payload.phase;
+      if (payload.progress) {
+        el.progress.textContent = `${payload.progress.done || 0} / ${payload.progress.total || 0}`;
+      }
+      if (typeof payload.defects_count === "number") el.defects.textContent = String(payload.defects_count);
+      if (Array.isArray(payload.defects)) el.defects.textContent = String(payload.defects.length);
+      if (type === "mosaic_result" && typeof payload.defects_count === "number") {
+        el.defects.textContent = String(payload.defects_count);
+      }
+      if (type === "scan_complete") el.phase.textContent = "完成";
+      if (type === "scan_error" || type === "phone_error" || type === "video_error") {
+        el.phase.textContent = "错误";
+      }
+      const message = payload.message || payload.error || payload.phase || "";
+      log(`${type}${message ? " · " + message : ""}`);
+    }
+
+    async function refreshStatus() {
+      try {
+        const response = await fetch("/api/system/status", { cache: "no-store" });
+        const status = await response.json();
+        const cloud = status.cloud_detection || {};
+        const motor = status.motor || {};
+        const camera = status.camera || {};
+        el.cloud.textContent = cloud.enabled && cloud.configured ? "已启用" : "未配置";
+        el.cloud.className = cloud.enabled && cloud.configured ? "ok" : "bad";
+        el.motor.textContent = motor.connected ? "真实/可用" : "dry-run";
+        el.camera.textContent = camera.runtime && camera.runtime.opened ? "已打开" : (camera.runtime && camera.runtime.source) || "-";
+        el.server.textContent = "正常";
+        el.server.className = "ok";
+        log("系统状态已刷新");
+      } catch (error) {
+        el.server.textContent = "异常";
+        el.server.className = "bad";
+        log(`状态刷新失败: ${error}`);
+      }
+    }
+
+    function startRealScan() {
+      send("start_scan", {
+        operation_mode: "real",
+        capture_mode: "real",
+        detection_platform: "huawei_cloud",
+        experiment_profile: el.profile.value,
+        pcb_length_mm: Number(el.length.value || 100),
+        pcb_width_mm: Number(el.width.value || 70),
+        origin_x_mm: 0,
+        origin_y_mm: 0,
+        motion_speed_mm_s: Number(el.speed.value || 3),
+        settle_seconds: Number(el.settle.value || 0.05),
+        image_path: "algorithm/outputs/camera/latest.jpg"
+      });
+    }
+
+    document.getElementById("connectBtn").addEventListener("click", connect);
+    document.getElementById("homeBtn").addEventListener("click", () => send("home_all_axes"));
+    document.getElementById("startBtn").addEventListener("click", startRealScan);
+    document.getElementById("stopBtn").addEventListener("click", () => send("stop_scan"));
+    document.getElementById("refreshBtn").addEventListener("click", refreshStatus);
+    document.getElementById("phoneBtn").addEventListener("click", () => {
+      location.href = "/phone";
+    });
+
+    setInterval(() => { el.clock.textContent = now(); }, 1000);
+    connect();
+    refreshStatus();
+  </script>
+</body>
+</html>

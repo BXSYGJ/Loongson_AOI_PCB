@@ -28,6 +28,48 @@ def remove_tree_retry(path: Path) -> None:
 
 
 class ScanMosaicTests(unittest.TestCase):
+    def test_board_lite_routes_and_control_broadcast(self):
+        lite_html = (camera_trigger.ROOT / "static" / "board_lite.html").read_text(encoding="utf-8")
+        self.assertIn("龙芯 AOI 板端轻量控制台", lite_html)
+        self.assertIn('id="startBtn"', lite_html)
+        self.assertIn('id="stopBtn"', lite_html)
+        self.assertIn('send("start_scan"', lite_html)
+
+        original_lite_ui = main.BOARD_LITE_UI
+        try:
+            main.BOARD_LITE_UI = True
+            lite_response = asyncio.run(main.index())
+            self.assertEqual(Path(lite_response.path).name, "board_lite.html")
+            full_response = asyncio.run(main.full_console())
+            self.assertEqual(Path(full_response.path).name, "index.html")
+        finally:
+            main.BOARD_LITE_UI = original_lite_ui
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.packets = []
+
+            async def send_json(self, packet):
+                self.packets.append(packet)
+
+        async def broadcast_once():
+            owner = FakeWebSocket()
+            observer = FakeWebSocket()
+            async with main.control_websockets_lock:
+                main.control_websockets.clear()
+                main.control_websockets.update({owner, observer})
+            try:
+                await main.send_packet(owner, "grid_plan", {"cells": 16}, "scan-lite", broadcast=True)
+                return owner.packets, observer.packets
+            finally:
+                async with main.control_websockets_lock:
+                    main.control_websockets.clear()
+
+        owner_packets, observer_packets = asyncio.run(broadcast_once())
+        self.assertEqual(owner_packets, observer_packets)
+        self.assertEqual(owner_packets[0]["type"], "grid_plan")
+        self.assertEqual(owner_packets[0]["scan_id"], "scan-lite")
+
     def test_real_motion_ui_caps_speed_and_displays_motion_telemetry(self):
         root = Path(__file__).resolve().parent
         html = (root / "static" / "index.html").read_text(encoding="utf-8")
