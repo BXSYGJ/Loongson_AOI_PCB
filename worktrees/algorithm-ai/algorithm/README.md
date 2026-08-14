@@ -82,3 +82,16 @@ python algorithm/scripts/detect.py --weights runs/detect/pcb_defects/weights/bes
 algorithm/outputs/detections/result.jpg
 algorithm/outputs/detections/result.json
 ```
+
+## 现场采集与增强训练工具
+
+2026-08-14 起，本目录补充了面向龙芯教育派现场数据采集和增强训练的辅助工具。它们用于模型与数据集维护，不替代完整网站、华为云检测服务或现有的 `camera_trigger.py` 运行链路。
+
+- `core/camera_capture_board.py`：从板端相机采集单张或定时 PCB 图片；仅在人工执行时访问相机。
+- `core/detect_onnx.py`：使用 ONNX Runtime 进行离线单图诊断，适合开发机交叉验证；龙芯正式运行仍使用现有 OpenCV DNN 路径。
+- `configs/pcb_defects_tuned.yaml`：现场样本增强后的独立数据集配置。
+- `tools/integrate_field_to_dataset.py`：将已标注的现场图像复制并划分到训练、验证集。
+- `tools/build_tuned_dataset.py`：在不修改原始数据集的前提下构建现场样本加权数据集。
+- `tools/balance_single_class_augmented.py`：补充类别不平衡时的增强样本。
+
+上述工具可能创建 `algorithm/outputs/`、`datasets/` 或训练产物；这些生成内容保持在 Git 忽略范围内。

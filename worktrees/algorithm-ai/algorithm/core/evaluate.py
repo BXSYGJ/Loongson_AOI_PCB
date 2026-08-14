@@ -6,6 +6,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 from train import ROOT, build_runtime_data_config
+from train import DATA_CONFIG
 
 
 def latest_best_weights() -> Path:
@@ -26,6 +27,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to best.pt. Defaults to the newest runs/detect/pcb_defects*/weights/best.pt.",
     )
+    parser.add_argument("--data", default=str(DATA_CONFIG), help="Dataset YAML config.")
     parser.add_argument("--split", default="test", choices=("train", "val", "test"), help="Dataset split to evaluate.")
     parser.add_argument("--imgsz", type=int, default=960, help="Evaluation image size.")
     parser.add_argument("--batch", type=int, default=8, help="Evaluation batch size.")
@@ -42,7 +44,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    runtime_data_config = build_runtime_data_config().resolve()
+    runtime_data_config = build_runtime_data_config(args.data).resolve()
     weights = Path(args.weights).resolve() if args.weights else latest_best_weights()
     project = (ROOT / "runs" / "detect").resolve()
     run_name = args.name
