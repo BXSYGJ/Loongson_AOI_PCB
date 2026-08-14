@@ -18,6 +18,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefix", default="field", help="Filename prefix.")
     parser.add_argument("--count", type=int, default=0, help="Auto-capture this many frames. 0 means manual mode.")
     parser.add_argument("--interval", type=float, default=1.0, help="Seconds between auto-captures.")
+    parser.add_argument("--width", type=int, default=1280, help="Requested capture width.")
+    parser.add_argument("--height", type=int, default=800, help="Requested capture height.")
     return parser.parse_args()
 
 
@@ -40,6 +42,13 @@ def main() -> None:
     cap = cv2.VideoCapture(parse_source(args.source))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera source: {args.source}")
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Requested resolution: {args.width}x{args.height}")
+    print(f"Actual resolution: {actual_width}x{actual_height}")
 
     saved = 0
     last_saved_path = None

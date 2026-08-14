@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--source", default="0", help="Camera index, video path, or stream URL. Defaults to camera 0.")
     parser.add_argument("--conf", type=float, default=0.5, help="Confidence threshold.")
-    parser.add_argument("--imgsz", type=int, default=960, help="Inference image size.")
+    parser.add_argument("--imgsz", type=int, default=1024, help="Inference image size.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for latest JSON and snapshots.")
     parser.add_argument("--save-video", action="store_true", help="Save annotated video to output-dir.")
     parser.add_argument("--no-window", action="store_true", help="Do not show the live preview window.")
